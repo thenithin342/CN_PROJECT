@@ -1,0 +1,14 @@
+# Core dependencies for LAN Collaboration System
+
+# Screen capture
+mss>=9.0.1
+
+# Image processing
+Pillow>=10.0.0
+
+# GUI for screen viewer
+PyQt5>=5.15.0
+
+# Note: Standard library used for networking (asyncio, socket, json)
+# No additional networking libraries required
+
