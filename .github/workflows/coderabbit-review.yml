@@ -48,7 +48,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
-          python-version: '3.8'
+          python-version: '3.11'
       
       - name: Install dependencies
         run: |
@@ -81,7 +81,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
-          python-version: '3.8'
+          python-version: '3.11'
       
       - name: Install security scanner
         run: |
@@ -92,10 +92,73 @@ jobs:
           bandit -r client/ server/ -f json -o bandit-report.json
         continue-on-error: true
       
+      - name: Check Bandit for high/critical findings
+        run: |
+          python << 'EOF'
+          import json
+          import sys
+          
+          try:
+              with open('bandit-report.json', 'r') as f:
+                  report = json.load(f)
+              
+              high_critical_count = 0
+              severity_map = {'HIGH': 3, 'MEDIUM': 2, 'LOW': 1, 'INFO': 0}
+              
+              for file in report.get('results', []):
+                  severity = file.get('issue_severity', '')
+                  if severity in severity_map and severity_map[severity] >= severity_map['HIGH']:
+                      high_critical_count += 1
+                      print(f"Critical/High finding: {file.get('test_name')} - {file.get('issue_text')}")
+              
+              if high_critical_count > 0:
+                  print(f"\nFound {high_critical_count} HIGH or CRITICAL security issues. Failing job.")
+                  sys.exit(1)
+              else:
+                  print("No high/critical security issues found in Bandit scan.")
+          except FileNotFoundError:
+              print("bandit-report.json not found")
+              sys.exit(1)
+          except Exception as e:
+              print(f"Error parsing bandit report: {e}")
+              sys.exit(1)
+          EOF
+      
       - name: Check dependencies for vulnerabilities
         run: |
-          safety check --json
+          safety check --json -o safety-report.json
         continue-on-error: true
+      
+      - name: Check Safety for high/critical findings
+        run: |
+          python << 'EOF'
+          import json
+          import sys
+          
+          try:
+              with open('safety-report.json', 'r') as f:
+                  report = json.load(f)
+              
+              high_critical_count = 0
+              
+              for vuln in report:
+                  severity = vuln.get('severity', '').upper()
+                  if severity in ['HIGH', 'CRITICAL']:
+                      high_critical_count += 1
+                      print(f"Critical/High vulnerability: {vuln.get('package')} - {vuln.get('vulnerability')}")
+              
+              if high_critical_count > 0:
+                  print(f"\nFound {high_critical_count} HIGH or CRITICAL vulnerabilities. Failing job.")
+                  sys.exit(1)
+              else:
+                  print("No high/critical vulnerabilities found in Safety check.")
+          except FileNotFoundError:
+              print("safety-report.json not found")
+              sys.exit(1)
+          except Exception as e:
+              print(f"Error parsing safety report: {e}")
+              sys.exit(1)
+          EOF
 
   code-quality:
     runs-on: ubuntu-latest
@@ -106,7 +169,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
-          python-version: '3.8'
+          python-version: '3.11'
       
       - name: Install dependencies
         run: |
