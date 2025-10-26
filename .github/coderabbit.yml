@@ -1,0 +1,128 @@
+# CodeRabbit Configuration
+# https://docs.coderabbit.ai
+
+language:
+  # Primary language for the project
+  primary: python
+
+reviews:
+  # Review configuration
+  top_level_only: true
+  review_state: approved
+  auto_merge: true
+  
+  # Review scope
+  review_as_comments: false
+  review_as_approve: true
+  
+  # Ignore specific patterns
+  ignore:
+    - "**/*.md"
+    - "**/__pycache__/**"
+    - "**/requirements.txt"
+    - "**/.git/**"
+
+chat:
+  # Enable chat functionality
+  enabled: true
+  
+analyses:
+  # Security analysis
+  security:
+    enabled: true
+    severity_threshold: medium
+  
+  # Code quality
+  quality:
+    enabled: true
+    
+  # Performance analysis
+  performance:
+    enabled: true
+    
+  # Maintainability
+  maintainability:
+    enabled: true
+    
+  # Test coverage (if tests exist)
+  test_coverage:
+    enabled: true
+    target_percentage: 70
+
+code_suggestions:
+  # Code improvement suggestions
+  enabled: true
+  
+  # Focus areas
+  focus:
+    - performance
+    - security
+    - best_practices
+    - code_smell
+  
+  # Language-specific suggestions
+  python:
+    suggest_type_hints: true
+    suggest_docstrings: true
+    check_python_version: "3.8+"
+
+path_filters:
+  # Files to include in review
+  included_paths:
+    - "client/**/*.py"
+    - "server/**/*.py"
+    - "common/**/*.py"
+    - "*.py"
+  
+  # Files to exclude
+  excluded_paths:
+    - "**/__pycache__/**"
+    - "**/*.pyc"
+    - "**/node_modules/**"
+    - "**/.git/**"
+    - "**/logs/**"
+
+classes:
+  # Define review classes for different components
+  - name: "Audio System"
+    paths:
+      - "client/audio/**/*.py"
+      - "server/audio/**/*.py"
+    focus:
+      - real_time_processing
+      - memory_efficiency
+      - latency
+  
+  - name: "Network Protocol"
+    paths:
+      - "common/**/*.py"
+      - "client/main_client.py"
+      - "server/main_server.py"
+    focus:
+      - security
+      - error_handling
+      - protocol_design
+  
+  - name: "File Transfer"
+    paths:
+      - "client/files/**/*.py"
+      - "server/files/**/*.py"
+    focus:
+      - security
+      - reliability
+      - progress_tracking
+  
+  - name: "Screen Sharing"
+    paths:
+      - "client/screen/**/*.py"
+      - "server/screen/**/*.py"
+    focus:
+      - performance
+      - bandwidth_optimization
+      - image_compression
+
+notifications:
+  # Notification settings
+  comment_on_review: true
+  comment_on_suggestions: true
+  comment_on_changes: true
