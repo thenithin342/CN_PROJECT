@@ -17,6 +17,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from server.chat.chat_server import ChatServer
 from server.files.file_server import FileServer
 from server.screen.screen_server import ScreenServer
+from server.audio.audio_server import AudioServer
 from server.utils.config import ServerConfig
 from server.utils.logger import logger
 from common.constants import MessageTypes
@@ -25,7 +26,7 @@ from common.constants import MessageTypes
 class CollaborationServer:
     """Main server class that integrates all functionality."""
     
-    def __init__(self, host: str = '0.0.0.0', port: int = 9000, upload_dir: str = 'uploads'):
+    def __init__(self, host: str = '0.0.0.0', port: int = 9000, upload_dir: str = 'uploads', audio_port: int = 11000):
         self.config = ServerConfig(host, port, upload_dir)
         self.clients: Dict[int, asyncio.StreamWriter] = {}  # uid -> writer
         
@@ -33,6 +34,7 @@ class CollaborationServer:
         self.chat_server = ChatServer()
         self.file_server = FileServer(upload_dir, self.chat_server.participants, self.broadcast)
         self.screen_server = ScreenServer(self.chat_server.participants)
+        self.audio_server = AudioServer(host, audio_port)
     
     async def broadcast(self, message: dict, exclude_uid: int = None):
         """Send a JSON message to all connected clients."""
@@ -119,6 +121,10 @@ class CollaborationServer:
     
     async def start(self):
         """Start the server."""
+        # Start audio server in background
+        audio_task = asyncio.create_task(self.audio_server.start())
+        
+        # Start main TCP server
         server = await asyncio.start_server(
             self.handle_client,
             self.config.host,
@@ -134,9 +140,11 @@ class CollaborationServer:
 
 if __name__ == "__main__":
     try:
-        server = CollaborationServer(host='0.0.0.0', port=9000)
+        server = CollaborationServer(host='0.0.0.0', port=9000, audio_port=11000)
         asyncio.run(server.start())
     except KeyboardInterrupt:
         logger.info("Server shutting down...")
+        server.audio_server.stop()
     except Exception as e:
         logger.log_error("server", e)
+        server.audio_server.stop()

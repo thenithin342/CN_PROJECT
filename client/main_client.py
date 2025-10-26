@@ -17,6 +17,7 @@ from client.chat.chat_client import ChatClient
 from client.files.file_client import FileClient
 from client.screen.screen_presenter import ScreenPresenter
 from client.screen.screen_viewer import ScreenViewer
+from client.audio.audio_client import AudioClient
 from client.ui.client_gui import ClientGUI
 from client.utils.config import ClientConfig
 from client.utils.logger import logger
@@ -27,7 +28,7 @@ from common.protocol_definitions import create_login_message, create_logout_mess
 class CollaborationClient:
     """Main client class that integrates all functionality."""
     
-    def __init__(self, host: str = 'localhost', port: int = 9000, username: str = None):
+    def __init__(self, host: str = 'localhost', port: int = 9000, username: str = None, audio_port: int = 11000):
         self.config = ClientConfig(host, port, username)
         self.reader = None
         self.writer = None
@@ -39,6 +40,7 @@ class CollaborationClient:
         self.file_client = FileClient()
         self.screen_presenter = ScreenPresenter()
         self.screen_viewer = ScreenViewer()
+        self.audio_client = AudioClient(server_ip=host, server_port=audio_port, uid=None)
         self.gui = ClientGUI()
         
         # Set up module connections
@@ -135,6 +137,7 @@ class CollaborationClient:
             self.chat_client.set_uid(self.uid)
             self.screen_presenter.set_uid(self.uid)
             self.screen_viewer.set_uid(self.uid)
+            self.audio_client.uid = self.uid
             
             # Request chat history after successful login
             await self.chat_client.request_history()
@@ -200,6 +203,9 @@ class CollaborationClient:
                 self.writer.close()
                 await self.writer.wait_closed()
             
+            # Clean up audio client
+            self.audio_client.cleanup()
+            
             logger.info("[INFO] Disconnected from server")
     
     async def interactive_mode(self):
@@ -256,6 +262,9 @@ class CollaborationClient:
                 self.writer.close()
                 await self.writer.wait_closed()
             
+            # Clean up audio client
+            self.audio_client.cleanup()
+            
             logger.info("[INFO] Disconnected from server")
 
 
@@ -269,7 +278,8 @@ async def main():
     client = CollaborationClient(
         host='localhost',
         port=9000,
-        username=username
+        username=username,
+        audio_port=11000
     )
     
     try:
