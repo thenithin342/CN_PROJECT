@@ -9,7 +9,7 @@ reviews:
   # Review configuration
   top_level_only: true
   review_state: approved
-  auto_merge: true
+  auto_merge: false
   
   # Review scope
   review_as_comments: false
