@@ -10,6 +10,9 @@ DEFAULT_SERVER_HOST = '0.0.0.0'
 DEFAULT_PORT = 9000
 DEFAULT_EPHEMERAL_PORT_START = 10000
 
+# UDP Ports
+DEFAULT_AUDIO_PORT = 11000
+DEFAULT_VIDEO_PORT = 11001
 # Buffer Sizes
 CHUNK_SIZE = 8192
 PROGRESS_LOG_INTERVAL = 1024 * 1024  # Log progress every 1MB
@@ -21,6 +24,12 @@ TRANSFER_TIMEOUT = 300  # 5 minutes in seconds
 # File Transfer
 UPLOAD_DIR = 'uploads'
 DOWNLOAD_DIR = 'downloads'
+MAX_FILE_SIZE = 100 * 1024 * 1024  # 100MB file upload limit
+
+# Connection Settings
+MAX_RETRY_ATTEMPTS = 3
+RECONNECT_ATTEMPTS = 5
+RECONNECT_DELAY_BASE = 2.0  # seconds for exponential backoff
 
 # Screen Sharing
 DEFAULT_FPS = 3
@@ -63,7 +72,7 @@ class MessageTypes:
     FILE_DOWNLOAD_PORT = 'file_download_port'
     FILE_AVAILABLE = 'file_available'
     SCREEN_SHARE_PORTS = 'screen_share_ports'
-    PRESENT_START = 'present_start'
-    PRESENT_STOP = 'present_stop'
+    PRESENT_START_BROADCAST = 'present_start_broadcast'  # Server broadcasts when someone starts presenting
+    PRESENT_STOP_BROADCAST = 'present_stop_broadcast'    # Server broadcasts when someone stops presenting
     UNICAST_SENT = 'unicast_sent'
     ERROR = 'error'

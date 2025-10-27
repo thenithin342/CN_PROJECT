@@ -53,15 +53,17 @@ class ChatServer:
         """Send a JSON message to a specific client."""
         async with self.lock:
             writer = clients.get(uid)
-            if writer:
-                try:
-                    msg_data = json.dumps(message).encode('utf-8') + b'\n'
-                    writer.write(msg_data)
-                    await writer.drain()
-                except Exception as e:
-                    logger.error(f"Failed to send to uid={uid}: {e}")
-                    return False
-        return True
+            if writer is None:
+                return False
+        
+        try:
+            msg_data = json.dumps(message).encode('utf-8') + b'\n'
+            writer.write(msg_data)
+            await writer.drain()
+            return True
+        except Exception as e:
+            logger.error(f"Failed to send to uid={uid}: {e}")
+            return False
     
     async def handle_login(self, uid: int, data: dict, clients: Dict[int, asyncio.StreamWriter]):
         """Process login message."""
@@ -79,20 +81,29 @@ class ChatServer:
         # Send confirmation to the client
         await self.send_message(uid, create_login_success_message(uid, username), clients)
         
-        # Broadcast user_joined to all clients
-        await self.broadcast(create_user_joined_message(uid, username), clients)
-        
-        # Send current participant list to the new user
+        # Get current participant list
         async with self.lock:
             participants_list = list(self.participants.values())
         
-        await self.send_message(uid, create_participant_list_message(participants_list), clients)
+        # Broadcast user_joined to all other clients (but not the new user)
+        await self.broadcast(create_user_joined_message(uid, username), clients, exclude_uid=uid)
+        
+        # Broadcast updated participant list to ALL clients (including the new user)
+        await self.broadcast(create_participant_list_message(participants_list), clients)
     
     async def handle_heartbeat(self, uid: int, data: dict, clients: Dict[int, asyncio.StreamWriter]):
         """Process heartbeat message."""
         logger.debug(f"Heartbeat from uid={uid}")
+        
+        # Get current participant list
+        async with self.lock:
+            participants_list = list(self.participants.values())
+        
         # Respond with heartbeat_ack
         await self.send_message(uid, create_heartbeat_ack_message(), clients)
+        
+        # Also send updated participant list
+        await self.send_message(uid, create_participant_list_message(participants_list), clients)
     
     async def handle_chat(self, uid: int, data: dict, clients: Dict[int, asyncio.StreamWriter]):
         """Process chat message and broadcast to all."""
@@ -201,6 +212,9 @@ class ChatServer:
     
     async def disconnect_client(self, uid: int, clients: Dict[int, asyncio.StreamWriter]):
         """Remove client and notify others."""
+        username = None
+        participants_list = None
+        
         async with self.lock:
             if uid in clients:
                 writer = clients[uid]
@@ -213,11 +227,20 @@ class ChatServer:
             
             if uid in self.participants:
                 user_info = self.participants[uid]
+                username = user_info.get('username', 'unknown')
                 del self.participants[uid]
-                logger.log_disconnect(user_info.get('username', 'unknown'), uid)
+                logger.log_disconnect(username, uid)
                 
-                # Broadcast user_left event
-                await self.broadcast(create_user_left_message(uid, user_info.get('username', 'unknown')), clients)
+                # Get updated participant list
+                participants_list = list(self.participants.values())
+        
+        # Perform broadcast operations outside the lock to avoid deadlock
+        if username is not None:
+            # Broadcast user_left event
+            await self.broadcast(create_user_left_message(uid, username), clients)
+            
+            # Broadcast updated participant list to all clients
+            await self.broadcast(create_participant_list_message(participants_list), clients)
     
     def get_next_uid(self) -> int:
         """Get the next available UID."""

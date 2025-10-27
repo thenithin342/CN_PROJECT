@@ -18,17 +18,19 @@ from client.files.file_client import FileClient
 from client.screen.screen_presenter import ScreenPresenter
 from client.screen.screen_viewer import ScreenViewer
 from client.audio.audio_client import AudioClient
-from client.ui.client_gui import ClientGUI
+from client.video.video_client import VideoClient
+from client.ui.client_gui import ClientMainWindow
 from client.utils.config import ClientConfig
 from client.utils.logger import logger
-from common.constants import MessageTypes
+from common.constants import MessageTypes, MAX_RETRY_ATTEMPTS, RECONNECT_ATTEMPTS, RECONNECT_DELAY_BASE
 from common.protocol_definitions import create_login_message, create_logout_message
 
 
 class CollaborationClient:
     """Main client class that integrates all functionality."""
     
-    def __init__(self, host: str = 'localhost', port: int = 9000, username: str = None, audio_port: int = 11000):
+    def __init__(self, host: str = 'localhost', port: int = 9000, username: str = None, 
+                 audio_port: int = 11000, video_port: int = 10000):
         self.config = ClientConfig(host, port, username)
         self.reader = None
         self.writer = None
@@ -41,7 +43,9 @@ class CollaborationClient:
         self.screen_presenter = ScreenPresenter()
         self.screen_viewer = ScreenViewer()
         self.audio_client = AudioClient(server_ip=host, server_port=audio_port, uid=None)
-        self.gui = ClientGUI()
+        self.video_client = VideoClient(server_ip=host, server_port=video_port, uid=None)
+        # GUI is not used in this main client - it's a standalone app
+        self.gui = None
         
         # Set up module connections
         self._setup_modules()
@@ -59,24 +63,36 @@ class CollaborationClient:
         self.screen_presenter.set_host(self.config.host)
         self.screen_viewer.set_host(self.config.host)
     
-    async def connect(self):
-        """Establish connection to the server."""
-        try:
-            self.reader, self.writer = await asyncio.open_connection(self.config.host, self.config.port)
-            logger.log_connection(self.config.host, self.config.port, True)
-            self.running = True
-            
-            # Set writer for all modules
-            self.chat_client.set_writer(self.writer)
-            self.file_client.set_writer(self.writer)
-            self.screen_presenter.set_writer(self.writer)
-            self.screen_viewer.set_writer(self.writer)
-            
-            return True
-        except Exception as e:
-            logger.log_connection(self.config.host, self.config.port, False)
-            logger.log_error("connection", e)
-            return False
+    async def connect(self, retry_count: int = MAX_RETRY_ATTEMPTS, base_delay: float = 1.0):
+        """Establish connection to the server with retry logic and exponential backoff."""
+        attempt = 0
+        
+        while attempt < retry_count:
+            try:
+                self.reader, self.writer = await asyncio.open_connection(self.config.host, self.config.port)
+                logger.log_connection(self.config.host, self.config.port, True)
+                self.running = True
+                
+                # Set writer for all modules
+                self.chat_client.set_writer(self.writer)
+                self.file_client.set_writer(self.writer)
+                self.screen_presenter.set_writer(self.writer)
+                self.screen_viewer.set_writer(self.writer)
+                
+                return True
+            except Exception as e:
+                attempt += 1
+                logger.log_connection(self.config.host, self.config.port, False)
+                logger.log_error("connection", e)
+                
+                if attempt < retry_count:
+                    delay = base_delay * (2 ** (attempt - 1))  # Exponential backoff
+                    logger.info(f"[INFO] Retrying connection in {delay}s (attempt {attempt}/{retry_count})...")
+                    await asyncio.sleep(delay)
+                else:
+                    logger.error(f"[ERROR] Failed to connect after {retry_count} attempts")
+                    return False
+        return False
     
     async def send_login(self):
         """Send login message to server."""
@@ -100,14 +116,14 @@ class CollaborationClient:
         await self.chat_client.send_message(logout_msg)
     
     async def listen_for_messages(self):
-        """Listen for incoming messages from server."""
-        try:
-            while self.running:
+        """Listen for incoming messages from server with automatic reconnection."""
+        while self.running:
+            try:
                 data = await self.reader.readline()
                 if not data:
-                    logger.info("[INFO] Server closed connection")
-                    self.running = False
-                    break
+                    logger.info("[INFO] Server closed connection, attempting to reconnect...")
+                    await self._reconnect()
+                    continue
                 
                 try:
                     import json
@@ -118,11 +134,41 @@ class CollaborationClient:
                 except Exception as e:
                     logger.error(f"[ERROR] Error processing message: {e}")
         
-        except asyncio.CancelledError:
-            logger.info("[INFO] Listener cancelled")
-        except Exception as e:
-            logger.error(f"[ERROR] Connection error: {e}")
-            self.running = False
+            except asyncio.CancelledError:
+                logger.info("[INFO] Listener cancelled")
+                break
+            except ConnectionError as e:
+                logger.error(f"[ERROR] Connection lost: {e}")
+                if self.running:
+                    if await self._reconnect():
+                        continue  # Resume listening after successful reconnection
+                break
+            except Exception as e:
+                logger.error(f"[ERROR] Connection error: {e}")
+                if self.running:
+                    if await self._reconnect():
+                        continue  # Resume listening after successful reconnection
+                self.running = False
+                break
+    
+    async def _reconnect(self):
+        """Reconnect to the server with exponential backoff."""
+        max_attempts = RECONNECT_ATTEMPTS
+        base_delay = RECONNECT_DELAY_BASE
+        
+        for attempt in range(max_attempts):
+            delay = base_delay * (2 ** attempt)
+            logger.info(f"[INFO] Attempting to reconnect in {delay}s (attempt {attempt + 1}/{max_attempts})...")
+            await asyncio.sleep(delay)
+            
+            if await self.connect(retry_count=1):
+                logger.info("[INFO] Reconnected successfully!")
+                await self.send_login()
+                return True
+        
+        logger.error("[ERROR] Failed to reconnect after multiple attempts")
+        self.running = False
+        return False
     
     async def handle_message(self, message: dict):
         """Handle different types of messages from server."""
@@ -137,7 +183,8 @@ class CollaborationClient:
             self.chat_client.set_uid(self.uid)
             self.screen_presenter.set_uid(self.uid)
             self.screen_viewer.set_uid(self.uid)
-            self.audio_client.uid = self.uid
+            self.audio_client.set_uid(self.uid)
+            self.video_client.set_uid(self.uid)
             
             # Request chat history after successful login
             await self.chat_client.request_history()
@@ -203,8 +250,9 @@ class CollaborationClient:
                 self.writer.close()
                 await self.writer.wait_closed()
             
-            # Clean up audio client
+            # Clean up audio and video clients
             self.audio_client.cleanup()
+            self.video_client.cleanup()
             
             logger.info("[INFO] Disconnected from server")
     
@@ -233,7 +281,8 @@ class CollaborationClient:
                         None, sys.stdin.readline
                     )
                     if user_input.strip():
-                        await self.gui.handle_user_input(user_input.strip(), self)
+                        # Handle user input directly in this module
+                        await self.chat_client.send_message({"type": "chat", "text": user_input.strip()})
                 except EOFError:
                     break
         except asyncio.CancelledError:
@@ -262,8 +311,9 @@ class CollaborationClient:
                 self.writer.close()
                 await self.writer.wait_closed()
             
-            # Clean up audio client
+            # Clean up audio and video clients
             self.audio_client.cleanup()
+            self.video_client.cleanup()
             
             logger.info("[INFO] Disconnected from server")
 
@@ -279,7 +329,8 @@ async def main():
         host='localhost',
         port=9000,
         username=username,
-        audio_port=11000
+        audio_port=11000,
+        video_port=10000
     )
     
     try:

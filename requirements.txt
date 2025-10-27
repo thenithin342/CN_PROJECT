@@ -6,9 +6,29 @@ mss>=9.0.1
 # Image processing
 Pillow>=10.0.0
 
-# GUI for screen viewer
+# Video capture and processing
+opencv-python>=4.8.0
+
+# GUI for screen viewer (PyQt5)
 PyQt5>=5.15.0
+
+# Modern GUI for client (PyQt6)
+PyQt6>=6.4.0
+
+# Audio capture and playback
+sounddevice>=0.4.6
+numpy>=1.24.0
+
+# Audio encoding/decoding
+# opuslib is REQUIRED for full audio functionality
+# PyAV can be used for additional media handling but is optional
+opuslib>=0.0.10
+
+# WebSocket support (for GUI client control channel)
+websockets>=11.0
+
+# Build tool for creating executables
+pyinstaller>=6.0
 
 # Note: Standard library used for networking (asyncio, socket, json)
 # No additional networking libraries required
-

@@ -218,9 +218,9 @@ class ScreenPresenter:
         
         if msg_type == MessageTypes.SCREEN_SHARE_PORTS:
             await self._handle_screen_share_ports(message)
-        elif msg_type == MessageTypes.PRESENT_START:
+        elif msg_type == MessageTypes.PRESENT_START_BROADCAST:
             await self._handle_present_start(message)
-        elif msg_type == MessageTypes.PRESENT_STOP:
+        elif msg_type == MessageTypes.PRESENT_STOP_BROADCAST:
             await self._handle_present_stop(message)
     
     async def _handle_screen_share_ports(self, message: dict):

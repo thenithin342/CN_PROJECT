@@ -10,7 +10,7 @@ import uuid
 from pathlib import Path
 from typing import Optional, Callable
 
-from common.constants import MessageTypes, CHUNK_SIZE, PROGRESS_LOG_INTERVAL
+from common.constants import MessageTypes, CHUNK_SIZE, PROGRESS_LOG_INTERVAL, MAX_FILE_SIZE, TRANSFER_TIMEOUT
 from common.protocol_definitions import create_file_offer_message, create_file_request_message
 
 
@@ -39,7 +39,11 @@ class FileClient:
     async def send_message(self, message: dict) -> bool:
         """Send a JSON message to the server."""
         if not self.writer:
-            print("[ERROR] Not connected to server")
+            try:
+                from client.utils.logger import logger
+                logger.error("[ERROR] Not connected to server")
+            except ImportError:
+                print("[ERROR] Not connected to server")
             return False
         
         try:
@@ -49,30 +53,55 @@ class FileClient:
             await self.writer.drain()
             return True
         except Exception as e:
-            print(f"[ERROR] Failed to send message: {e}")
+            try:
+                from client.utils.logger import logger
+                logger.error(f"[ERROR] Failed to send message: {e}")
+            except ImportError:
+                print(f"[ERROR] Failed to send message: {e}")
             return False
     
     async def upload_file(self, file_path: str) -> Optional[str]:
         """Upload a file to the server."""
         path = Path(file_path)
         
-        if not path.exists():
-            print(f"[ERROR] File not found: {file_path}")
-            return None
-        
-        if not path.is_file():
-            print(f"[ERROR] Not a file: {file_path}")
+        # Validate file path
+        try:
+            # Normalize the path to prevent path traversal
+            normalized_path = path.resolve()
+            
+            # Check if file exists
+            if not normalized_path.exists():
+                print(f"[ERROR] File not found: {file_path}")
+                return None
+            
+            # Ensure it's a file (not directory)
+            if not normalized_path.is_file():
+                print(f"[ERROR] Not a file: {file_path}")
+                return None
+            
+            # Validate file size
+            file_size = normalized_path.stat().st_size
+            if file_size > MAX_FILE_SIZE:
+                print(f"[ERROR] File too large: {file_size} bytes (max: {MAX_FILE_SIZE} bytes)")
+                return None
+            
+            if file_size == 0:
+                print(f"[ERROR] File is empty: {file_path}")
+                return None
+            
+        except (OSError, ValueError) as e:
+            print(f"[ERROR] Invalid file path: {e}")
             return None
         
         # Generate unique file ID
         fid = str(uuid.uuid4())
-        filename = path.name
-        size = path.stat().st_size
+        filename = normalized_path.name
+        size = normalized_path.stat().st_size
         
         print(f"[UPLOAD] Offering file: {filename} ({size} bytes, fid={fid})")
         
         # Store pending upload
-        self.pending_uploads[fid] = str(path.absolute())
+        self.pending_uploads[fid] = str(normalized_path.resolve())
         
         # Send file offer
         offer_msg = create_file_offer_message(fid, filename, size)
@@ -90,7 +119,11 @@ class FileClient:
         
         try:
             print(f"[UPLOAD] Connecting to upload port {upload_port}...")
-            reader, writer = await asyncio.open_connection(self.host, upload_port)
+            # Add connection timeout
+            reader, writer = await asyncio.wait_for(
+                asyncio.open_connection(self.host, upload_port),
+                timeout=10.0
+            )
             
             size = path.stat().st_size
             bytes_sent = 0
@@ -104,7 +137,8 @@ class FileClient:
                         break
                     
                     writer.write(data)
-                    await writer.drain()
+                    # Add timeout to drain operation
+                    await asyncio.wait_for(writer.drain(), timeout=30.0)
                     bytes_sent += len(data)
                     
                     # Show progress every 1MB
@@ -113,11 +147,14 @@ class FileClient:
                         print(f"[UPLOAD] Progress: {bytes_sent}/{size} bytes ({progress:.1f}%)")
             
             writer.close()
-            await writer.wait_closed()
+            await asyncio.wait_for(writer.wait_closed(), timeout=5.0)
             
             print(f"[UPLOAD] Upload complete: {path.name}")
             return True
         
+        except asyncio.TimeoutError:
+            print(f"[ERROR] Upload timed out for {path.name}")
+            return False
         except Exception as e:
             print(f"[ERROR] Upload failed: {e}")
             return False
@@ -138,18 +175,32 @@ class FileClient:
     
     async def do_file_download(self, fid: str, filename: str, size: int, download_port: int, save_path: str = None) -> bool:
         """Perform the actual file download from the given port."""
-        if save_path is None:
-            # Default: save to downloads directory
-            save_path = os.path.join("downloads", filename)
+        # Sanitize filename to prevent path traversal
+        safe_filename = os.path.basename(filename)
+        if not safe_filename or safe_filename in ('.', '..'):
+            print(f"[ERROR] Invalid filename: {filename}")
+            return False
         
-        # Ensure downloads directory exists
-        save_dir = Path(save_path).parent
-        save_dir.mkdir(parents=True, exist_ok=True)
-        print(f"[DOWNLOAD] Saving to: {save_path}")
+        if save_path is None:
+            # Default: save to downloads directory with sanitized filename
+            save_path = os.path.join("downloads", safe_filename)
+        
+        # Ensure save path is valid and parent directory exists
+        try:
+            save_path_resolved = Path(save_path).resolve()
+            save_path_resolved.parent.mkdir(parents=True, exist_ok=True)
+            print(f"[DOWNLOAD] Saving to: {save_path_resolved}")
+        except (ValueError, OSError) as e:
+            print(f"[ERROR] Invalid save path: {e}")
+            return False
         
         try:
             print(f"[DOWNLOAD] Connecting to download port {download_port}...")
-            reader, writer = await asyncio.open_connection(self.host, download_port)
+            # Add connection timeout
+            reader, writer = await asyncio.wait_for(
+                asyncio.open_connection(self.host, download_port),
+                timeout=10.0
+            )
             
             bytes_received = 0
             
@@ -157,7 +208,8 @@ class FileClient:
             
             with open(save_path, 'wb') as f:
                 while bytes_received < size:
-                    data = await reader.read(CHUNK_SIZE)
+                    # Add timeout to read operation
+                    data = await asyncio.wait_for(reader.read(CHUNK_SIZE), timeout=30.0)
                     if not data:
                         break
                     
@@ -170,7 +222,7 @@ class FileClient:
                         print(f"[DOWNLOAD] Progress: {bytes_received}/{size} bytes ({progress:.1f}%)")
             
             writer.close()
-            await writer.wait_closed()
+            await asyncio.wait_for(writer.wait_closed(), timeout=5.0)
             
             if bytes_received == size:
                 print(f"[DOWNLOAD] Download complete: {save_path}")
@@ -181,6 +233,10 @@ class FileClient:
                 Path(save_path).unlink(missing_ok=True)
                 return False
         
+        except asyncio.TimeoutError:
+            print(f"[ERROR] Download timed out for {filename}")
+            Path(save_path).unlink(missing_ok=True)
+            return False
         except Exception as e:
             print(f"[ERROR] Download failed: {e}")
             Path(save_path).unlink(missing_ok=True)

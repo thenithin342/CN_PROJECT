@@ -32,6 +32,7 @@ from PyQt6.QtWidgets import (
     QListWidgetItem, QProgressBar, QFileDialog, QMessageBox, QInputDialog, QSizePolicy
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QSize, QTimer, QMutex, QUrl
+from PyQt6.QtCore import QMutexLocker
 from PyQt6.QtGui import QImage, QPixmap, QFont, QPalette, QColor
 
 # OpenCV for video
@@ -151,8 +152,6 @@ class VideoGridWidget(QWidget):
     def __init__(self):
         super().__init__()
         self.video_frames: Dict[int, VideoFrame] = {}
-        self.is_video_active = False  # Track if we're receiving active video
-        self.last_frame_time = {}  # Track last frame time per uid
         self.setup_ui()
     
     def setup_ui(self):
@@ -186,12 +185,6 @@ class VideoGridWidget(QWidget):
         frame.deleteLater()
         del self.video_frames[uid]
         
-        # Reset video active flag if no feeds remain
-        if uid in self.last_frame_time:
-            del self.last_frame_time[uid]
-        if not self.last_frame_time:
-            self.is_video_active = False
-        
         self.update_grid_layout()
     
     def update_grid_layout(self):
@@ -222,8 +215,6 @@ class VideoGridWidget(QWidget):
     def update_frame(self, uid: int, frame: np.ndarray):
         """Update frame for a specific user."""
         if uid in self.video_frames:
-            self.is_video_active = True
-            self.last_frame_time[uid] = time.time()
             self.video_frames[uid].update_frame(frame)
 
 
@@ -260,7 +251,7 @@ class ParticipantItem(QWidget):
         layout.addStretch()
         
         # Mute button (disabled for self)
-        self.mute_btn = QPushButton("🔇" if not self.is_muted else "🔊")
+        self.mute_btn = QPushButton("🔊" if not self.is_muted else "🔇")
         self.mute_btn.setMaximumWidth(40)
         self.mute_btn.setEnabled(not self.is_self)
         if not self.is_self:
@@ -276,7 +267,7 @@ class ParticipantItem(QWidget):
     def toggle_mute(self):
         """Toggle mute state and update button text."""
         self._is_muted = not self._is_muted
-        self.mute_btn.setText("🔊" if self._is_muted else "🔇")
+        self.mute_btn.setText("🔇" if self._is_muted else "🔊")
 
 
 class ParticipantPanel(QWidget):
@@ -312,8 +303,6 @@ class ParticipantPanel(QWidget):
                 padding: 5px;
             }
         """)
-        # Set minimum height to ensure visibility
-        self.participant_list.setMinimumHeight(100)
         layout.addWidget(self.participant_list)
         
         # Controls section
@@ -326,7 +315,7 @@ class ParticipantPanel(QWidget):
         self.parent_window = None
         
         # Audio button
-        self.audio_btn = QPushButton("🎤 Mute Audio")
+        self.audio_btn = QPushButton("🎤 Unmute Audio")
         self.audio_btn.clicked.connect(self.toggle_audio)
         layout.addWidget(self.audio_btn)
         
@@ -422,44 +411,7 @@ class ChatWidget(QWidget):
     
     def __init__(self):
         super().__init__()
-        # Initialize file links storage with TTL-based cleanup
-        self._file_links = {}  # fid -> {'filename': str, 'size': str, 'timestamp': float}
-        self._file_links_max_size = 100  # Max number of file links to store
-        self._file_links_ttl_seconds = 3600  # 1 hour TTL
         self.setup_ui()
-        # Setup periodic cleanup timer
-        self._setup_file_links_cleanup_timer()
-    
-    def _setup_file_links_cleanup_timer(self):
-        """Setup periodic timer to clean up old file links."""
-        self._file_links_cleanup_timer = QTimer(parent=self)  # Set parent for proper cleanup
-        self._file_links_cleanup_timer.timeout.connect(self._prune_file_links)
-        self._file_links_cleanup_timer.start(600000)  # Run every 10 minutes
-    
-    def _prune_file_links(self):
-        """Periodically prune old file links based on TTL."""
-        current_time = time.time()
-        expired_fids = []
-        
-        for fid, info in self._file_links.items():
-            timestamp = info.get('timestamp', 0)
-            if current_time - timestamp > self._file_links_ttl_seconds:
-                expired_fids.append(fid)
-        
-        for fid in expired_fids:
-            del self._file_links[fid]
-        
-        if expired_fids:
-            print(f"[CHAT] Pruned {len(expired_fids)} expired file links")
-    
-    def _evict_lru_file_link(self):
-        """Evict least recently used file link if at max capacity."""
-        if len(self._file_links) >= self._file_links_max_size:
-            # Remove the oldest entry
-            oldest_fid = min(self._file_links.keys(), 
-                           key=lambda fid: self._file_links[fid].get('timestamp', 0))
-            del self._file_links[oldest_fid]
-            print(f"[CHAT] Evicted oldest file link (max size reached)")
     
     def setup_ui(self):
         """Setup chat interface UI."""
@@ -636,11 +588,51 @@ class ChatWidget(QWidget):
         """Add file notification with download button."""
         timestamp = datetime.now().strftime("%H:%M")
         
+        # Create a container widget for the file notification
+        file_widget = QWidget()
+        file_layout = QHBoxLayout()
+        file_layout.setContentsMargins(10, 5, 10, 5)
+        file_layout.setSpacing(10)
+        
+        # Message label with HTML formatting
+        file_label = QLabel(f'<span style="color: #95A5A6;">[{timestamp}]</span> {message}')
+        file_label.setStyleSheet("color: #ECF0F1; font-size: 10pt;")
+        file_label.setTextFormat(Qt.TextFormat.RichText)
+        file_layout.addWidget(file_label)
+        
+        # Download button
+        download_btn = QPushButton("⬇️ Download")
+        download_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #3498DB;
+                color: white;
+                border: none;
+                padding: 5px 15px;
+                border-radius: 5px;
+                font-weight: bold;
+                font-size: 9pt;
+            }
+            QPushButton:hover {
+                background-color: #2980B9;
+            }
+        """)
+        download_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        # Store fid in the button so we can use it later
+        download_btn.setProperty("fid", fid)
+        download_btn.setProperty("filename", filename)
+        download_btn.clicked.connect(lambda: self._on_download_clicked(download_btn))
+        
+        file_layout.addWidget(download_btn)
+        file_layout.addStretch()
+        
+        file_widget.setLayout(file_layout)
+        
         # Insert into chat
         scrollbar = self.chat_text.verticalScrollBar()
         at_bottom = scrollbar.value() >= scrollbar.maximum() - 10
         
-        # Add as a custom HTML widget with a clickable link style
+        # Add as a custom HTML widget (this is a workaround since QTextEdit doesn't support widgets directly)
+        # Instead, we'll add it with a clickable link style
         notification_html = f'''
         <div style="background-color: #2C3E50; padding: 8px; border-radius: 5px; margin: 5px 0;">
             <span style="color: #95A5A6;">[{timestamp}]</span> {message}
@@ -652,45 +644,29 @@ class ChatWidget(QWidget):
         
         self.chat_text.append(notification_html)
         
-        # Store the fid for later lookup with timestamp
-        # Evict oldest entry if at max capacity
-        self._evict_lru_file_link()
-        
-        self._file_links[fid] = {
-            'filename': filename, 
-            'size': size_display,
-            'timestamp': time.time()
-        }
+        # Store the fid for later lookup
+        if not hasattr(self, '_file_links'):
+            self._file_links = {}
+        self._file_links[fid] = {'filename': filename, 'size': size_display}
         
         # Auto scroll to bottom
         if at_bottom:
             scrollbar.setValue(scrollbar.maximum())
     
+    def _on_download_clicked(self, button):
+        """Handle download button click."""
+        fid = button.property("fid")
+        filename = button.property("filename")
+        self.file_download_requested.emit(fid, filename)
+    
     def _on_anchor_clicked(self, url):
         """Handle anchor link clicks (for download links)."""
-        try:
-            print(f"[CHAT] Anchor clicked: {url.toString()}")
-            if url.scheme() == "download":
-                # Extract fid from URL (it's stored in the host component)
-                fid = url.host()
-                print(f"[CHAT] Processing download for fid: {fid}")
-                # Get filename from stored links (handle missing entry gracefully)
-                if fid in self._file_links:
-                    filename = self._file_links[fid]['filename']
-                    print(f"[CHAT] File found: {filename}, emitting signal...")
-                    self.file_download_requested.emit(fid, filename)
-                    # Immediately remove entry to prevent memory leak
-                    del self._file_links[fid]
-                    print(f"[CHAT] File link removed from storage")
-                else:
-                    # Entry missing (possibly expired or already downloaded)
-                    print(f"[CHAT] Warning: File link for fid={fid} not found (may have been cleaned up)")
-                    self.add_message("System", "File download link expired or already used", is_system=True)
-        except Exception as e:
-            print(f"[CHAT] Error handling download link: {e}")
-            import traceback
-            traceback.print_exc()
-            self.add_message("System", f"Error starting download: {e}", is_system=True)
+        if url.scheme() == "download":
+            fid = url.path()
+            # Get filename from stored links
+            if hasattr(self, '_file_links') and fid in self._file_links:
+                filename = self._file_links[fid]['filename']
+                self.file_download_requested.emit(fid, filename)
     
     def show_progress(self, value: int):
         """Show file upload progress."""
@@ -701,18 +677,6 @@ class ChatWidget(QWidget):
         """Hide progress bar."""
         self.progress_bar.setVisible(False)
         self.progress_bar.setValue(0)
-    
-    def closeEvent(self, event):
-        """Clean up resources when widget is closing."""
-        # Stop and clean up the file links cleanup timer
-        if hasattr(self, '_file_links_cleanup_timer') and self._file_links_cleanup_timer:
-            self._file_links_cleanup_timer.stop()
-            self._file_links_cleanup_timer.timeout.disconnect()
-            self._file_links_cleanup_timer.deleteLater()
-            self._file_links_cleanup_timer = None
-        
-        # Call parent closeEvent
-        super().closeEvent(event)
 
 
 # ============================================================================
@@ -748,6 +712,11 @@ class ClientMainWindow(QMainWindow):
         self.video_streams: Dict[int, np.ndarray] = {}
         self.running = False
         self.available_files = {}  # Store available files for download
+        
+        # Explicit state flags for media controls
+        self.audio_muted = True  # Audio starts muted (user needs to unmute)
+        self.video_streaming = False  # Video is off by default
+        self.screen_sharing = False  # Screen sharing is off by default
         
         # Worker storage (to prevent garbage collection)
         self.upload_worker = None
@@ -844,7 +813,7 @@ class ClientMainWindow(QMainWindow):
         """Send heartbeat message to server."""
         if self.network_thread and self.network_thread.writer:
             try:
-                message = create_heartbeat_message()
+                message = {"type": "heartbeat"}
                 self.network_thread.send_message(message)
             except Exception as e:
                 print(f"[GUI] Error sending heartbeat: {e}")
@@ -869,10 +838,6 @@ class ClientMainWindow(QMainWindow):
         self.username = text
         print(f"[GUI] Connecting as: {self.username}")
         
-        # Show connecting status
-        self.chat_widget.add_message("System", f"Connecting to {self.server_host}:{self.server_port}...", is_system=True)
-        self.setWindowTitle(f"LAN Collaboration Client - Connecting...")
-        
         # Start network thread
         self.network_thread = NetworkThread(self.server_host, self.server_port, self.username)
         self.network_thread.message_received.connect(self.handle_message)
@@ -884,97 +849,80 @@ class ClientMainWindow(QMainWindow):
     
     def setup_video_receiver(self):
         """Setup video receiver for remote feeds."""
-        # Note: Video receiver is now handled by video_client itself using ephemeral ports
-        # We don't need a separate VideoReceiverThread anymore
-        print("[GUI] Video receiving is handled by video_client using ephemeral ports")
-        self.video_receiver_thread = None  # Not used anymore
+        if HAS_OPENCV:
+            self.video_receiver_thread = VideoReceiverThread(self.server_host, 0)  # 0 = bind to any available port
+            self.video_receiver_thread.frame_received.connect(
+                lambda uid, frame: self._on_frame_received(uid, frame)
+            )
+            print("[GUI] Video receiver setup complete")
+        else:
+            print("[GUI] OpenCV not available, video receiver not started")
     
     def _on_frame_received(self, uid, frame):
-        """Handle received frame - called from video receiver thread."""
-        try:
-            print(f"[GUI] Frame received for uid={uid}, frame shape={frame.shape}")
-            
-            # Ensure the video feed exists in the grid
-            if uid not in self.video_grid.video_frames:
-                # Get username from participants
-                username = self.get_username_by_uid(uid) if uid in self.participants else f"User {uid}"
-                # Mark it as "You" if it's our own feed
-                if uid == self.uid and "(You)" not in username:
-                    username = f"{username} (You)"
-                print(f"[GUI] Adding NEW video feed for uid={uid}, username={username}")
-                self.video_grid.add_video_feed(uid, username)
-            
-            # Update the frame
-            self.video_grid.update_frame(uid, frame)
-            print(f"[GUI] Successfully updated video frame for uid={uid}")
-        except Exception as e:
-            print(f"[GUI] Error in _on_frame_received: {e}")
-            import traceback
-            traceback.print_exc()
+        """Handle received frame."""
+        print(f"[GUI] Frame received for uid={uid}, updating video grid")
+        self.video_grid.update_frame(uid, frame)
+    
+    def start_video_receiver(self):
+        """Start receiving video from remote users."""
+        if self.video_receiver_thread and not self.video_receiver_thread.isRunning():
+            self.video_receiver_thread.start()
     
     def stop_video_receiver(self):
         """Stop receiving video."""
-        # Video receiver is now part of video_client, no need to stop separately
-        pass
+        if self.video_receiver_thread and self.video_receiver_thread.isRunning():
+            self.video_receiver_thread.stop()
+            self.video_receiver_thread.wait()
     
     def initialize_client_modules(self):
         """Initialize client modules after successful login."""
-        if not self.network_thread or not self.network_thread.writer:
-            print("[ERROR] Writer not available, cannot initialize client modules")
-            self.chat_widget.add_message("System", "Failed to initialize client modules - connection issue", is_system=True)
-            return
+        # Reset the counter at the start of each initialization attempt
+        self._init_attempts = 0
+        self._max_init_attempts = 50  # 5 seconds at 100ms intervals
         
-        # Get writer from network thread
-        writer = self.network_thread.writer
+        # Use QTimer to poll asynchronously for writer availability
         
-        try:
-            # Initialize client modules
-            print(f"[GUI] Initializing client modules for uid={self.uid}")
-            self.audio_client = AudioClient(server_ip=self.server_host, server_port=11000, uid=self.uid)
-            self.video_client = VideoClient(server_ip=self.server_host, server_port=10000, uid=self.uid)
-            # Ensure UID is set on video client
-            if self.uid:
-                self.video_client.set_uid(self.uid)
-                print(f"[GUI] Video client UID set to {self.uid}")
+        def check_and_init():
+            if self._init_attempts >= self._max_init_attempts:
+                print("[WARNING] Writer not available after max attempts, skipping module initialization")
+                return
             
-            # Set up frame received callback - when video client receives a frame from another client, display it
-            self.video_client.set_frame_received_callback(self._on_frame_received)
-            self.file_client = FileClient()
-            self.chat_client = ChatClient(writer)
-            self.screen_presenter = ScreenPresenter(writer)
-            self.screen_viewer = ScreenViewer(writer)
+            self._init_attempts += 1
             
-            # Set UID for modules that need it
-            if self.uid:
-                self.screen_viewer.set_uid(self.uid)
-                print(f"[GUI] Screen viewer UID set to {self.uid}")
-            
-            # Set hosts and writer for modules that need it
-            self.file_client.set_host(self.server_host)
-            self.file_client.set_writer(writer)
-            self.screen_presenter.set_host(self.server_host)
-            self.screen_viewer.set_host(self.server_host)
-            
-            print("[GUI] Client modules initialized successfully")
-            self.chat_widget.add_message("System", "✓ Client modules initialized", is_system=True)
-            
-            # Video receiver is already started in setup_video_receiver()
-            # No need to start it again here
-        except Exception as e:
-            print(f"[GUI] Error initializing client modules: {e}")
-            import traceback
-            traceback.print_exc()
-            self.chat_widget.add_message("System", f"Failed to initialize client modules: {e}", is_system=True)
+            if self.network_thread and self.network_thread.writer:
+                # Writer is now available, initialize modules
+                writer = self.network_thread.writer
+                
+                # Initialize client modules
+                self.audio_client = AudioClient(server_ip=self.server_host, server_port=11000, uid=self.uid)
+                self.video_client = VideoClient(server_ip=self.server_host, server_port=10000, uid=self.uid)
+                self.file_client = FileClient()
+                self.chat_client = ChatClient(writer)
+                self.screen_presenter = ScreenPresenter(writer)
+                self.screen_viewer = ScreenViewer(writer)
+                
+                # Set hosts and writer for modules that need it
+                self.file_client.set_host(self.server_host)
+                self.file_client.set_writer(writer)
+                self.screen_presenter.set_host(self.server_host)
+                self.screen_viewer.set_host(self.server_host)
+                
+                # Start video receiver
+                self.start_video_receiver()
+            else:
+                # Schedule another check
+                QTimer.singleShot(100, check_and_init)
+        
+        # Start the async check
+        check_and_init()
             
     def on_connected(self):
         """Handle successful connection."""
-        self.chat_widget.add_message("System", "✓ Connected to server", is_system=True)
-        self.setWindowTitle(f"LAN Collaboration Client - {self.username} (Connected)")
+        self.chat_widget.add_message("System", "Connected to server", is_system=True)
     
     def on_disconnected(self):
         """Handle disconnection."""
-        self.chat_widget.add_message("System", "✗ Disconnected from server", is_system=True)
-        self.setWindowTitle("LAN Collaboration Client (Disconnected)")
+        self.chat_widget.add_message("System", "Disconnected from server", is_system=True)
     
     def handle_message(self, message: dict):
         """Handle incoming message from server."""
@@ -992,21 +940,12 @@ class ClientMainWindow(QMainWindow):
                 self.request_participant_list()
             
             elif msg_type == MessageTypes.PARTICIPANT_LIST:
-                participants_data = message.get('participants', [])
-                print(f"[GUI] Received participant_list message with {len(participants_data)} participants")
-                print(f"[GUI] Message data: {message}")
-                print(f"[GUI] Current self.uid: {self.uid}")
-                if self.uid is None:
-                    print("[GUI] Warning: Received participant list before setting UID, ignoring")
-                    return
-                self.update_participants(participants_data)
+                self.update_participants(message.get('participants', []))
             
             elif msg_type == MessageTypes.USER_JOINED:
                 uid = message.get('uid')
                 username = message.get('username')
-                print(f"[GUI] Received user_joined: uid={uid}, username={username}")
                 self.chat_widget.add_message("System", f"{username} joined", is_system=True)
-                # Note: Participant list should be updated via PARTICIPANT_LIST message
             
             elif msg_type == MessageTypes.USER_LEFT:
                 uid = message.get('uid')
@@ -1020,7 +959,6 @@ class ClientMainWindow(QMainWindow):
                 self.handle_broadcast_message(message)
             
             elif msg_type == MessageTypes.FILE_AVAILABLE:
-                print(f"[GUI] Received FILE_AVAILABLE message: {message}")
                 self.handle_file_available(message)
             
             elif msg_type == MessageTypes.FILE_UPLOAD_PORT:
@@ -1041,12 +979,6 @@ class ClientMainWindow(QMainWindow):
                 to_username = message.get('to_username', 'unknown')
                 self.chat_widget.add_message("System", f"Private message delivered to {to_username}", is_system=True)
             
-            elif msg_type == MessageTypes.PRESENT_START_BROADCAST:
-                self.handle_present_start_broadcast(message)
-            
-            elif msg_type == MessageTypes.PRESENT_STOP_BROADCAST:
-                self.handle_present_stop_broadcast(message)
-            
             elif msg_type == MessageTypes.ERROR:
                 error_msg = message.get('message', 'Unknown error')
                 self.chat_widget.add_message("System", f"Error: {error_msg}", is_system=True)
@@ -1060,36 +992,25 @@ class ClientMainWindow(QMainWindow):
         # Send a heartbeat to server which should trigger participant list update
         if self.network_thread:
             try:
-                message = create_heartbeat_message()
+                message = {"type": "heartbeat"}
                 self.network_thread.send_message(message)
             except Exception as e:
                 print(f"[GUI] Error requesting participant list: {e}")
     
     def update_participants(self, participants: List[dict]):
         """Update participant list."""
-        print(f"[GUI] Updating participants list with {len(participants)} participants")
-        print(f"[GUI] Participants data: {participants}")
-        
         # Clear existing
         for uid in list(self.participants.keys()):
             self.participant_panel.remove_participant(uid)
-            # Don't remove video feeds - they should persist if video is active
-            # self.video_grid.remove_video_feed(uid)
+            self.video_grid.remove_video_feed(uid)
         
         # Add new participants
         for p in participants:
             uid = p.get('uid')
             username = p.get('username')
-            if uid is None or username is None:
-                print(f"[GUI] Warning: Invalid participant data: {p}")
-                continue
             self.participants[uid] = p
             self.participant_panel.add_participant(uid, username, uid == self.uid)
-            print(f"[GUI] Added participant uid={uid}, username={username}")
-            # Add video feed placeholder for all participants
-            if uid not in self.video_grid.video_frames:
-                self.video_grid.add_video_feed(uid, username)
-                print(f"[GUI] Added video feed placeholder for participant uid={uid}, username={username}")
+            self.video_grid.add_video_feed(uid, username)
     
     def handle_chat_message(self, message: dict):
         """Handle incoming chat message."""
@@ -1124,11 +1045,8 @@ class ClientMainWindow(QMainWindow):
         size = message.get('size')
         uploader = message.get('uploader')
         
-        print(f"[FILE AVAILABLE] Received notification: fid={fid}, filename={filename}, size={size}, uploader={uploader}, my_username={self.username}")
-        
         # Don't notify about files we uploaded ourselves
         if uploader == self.username:
-            print(f"[FILE AVAILABLE] Skipping own file from {uploader}")
             return
         
         # Format file size
@@ -1189,20 +1107,26 @@ class ClientMainWindow(QMainWindow):
             self.chat_widget.add_message("System", "File client not initialized", is_system=True)
             return
         
+        # Check if upload is already in progress
+        if self.upload_worker is not None:
+            self.chat_widget.add_message("System", "File upload already in progress, please wait", is_system=True)
+            return
+        
         try:
             import asyncio
             self.chat_widget.add_message("System", f"Uploading file: {os.path.basename(file_path)}", is_system=True)
-            if self.network_thread and self.network_thread.loop:
-                future = asyncio.run_coroutine_threadsafe(self.file_client.upload_file(file_path), self.network_thread.loop)
-                result = future.result(timeout=10)
-                if result:
-                    self._on_upload_complete_with_result(True, None, result)
-                else:
-                    self._on_upload_complete_with_result(False, "Upload failed", None)
-            else:
-                self._on_upload_complete_with_result(False, "Network thread not available", None)
+            # Upload file using worker thread for async operation
+            worker = AsyncTaskWorker(self.file_client.upload_file, file_path)
+            # Capture worker in lambda to prevent race condition
+            worker.task_done.connect(lambda success, error, result, w=worker: self._on_upload_complete_with_result(success, error, result, w))
+            self.upload_worker = worker
+            worker.start()
+            # Show progress
+            self.chat_widget.show_progress(0)
+            # Upload progress will be handled by the FileUploadWorker
+            # The progress is updated in the worker and connected via task_done signal
         except Exception as e:
-            self._on_upload_complete_with_result(False, str(e), None)
+            self.chat_widget.add_message("System", f"Failed to upload file: {e}", is_system=True)
     
     def _on_upload_complete_with_result(self, success: bool, error: str, result, completing_worker=None):
         """Handle upload completion result from worker."""
@@ -1217,43 +1141,33 @@ class ClientMainWindow(QMainWindow):
         # Only clear worker reference if it's the same instance (prevents race condition)
         if completing_worker is not None and self.upload_worker is completing_worker:
             self.upload_worker = None
-        # Schedule the worker for deletion
-        if completing_worker:
-            completing_worker.deleteLater()
     
     def on_download_file(self, fid: str, filename: str):
         """Handle file download request from chat."""
-        print(f"[DOWNLOAD] on_download_file called: fid={fid}, filename={filename}")
+        if not self.file_client:
+            self.chat_widget.add_message("System", "File client not initialized", is_system=True)
+            return
+        
+        # Check if this file is available
+        if not hasattr(self, 'available_files') or fid not in self.available_files:
+            self.chat_widget.add_message("System", f"File {filename} is no longer available", is_system=True)
+            return
+        
+        # Ask user where to save the file
+        from PyQt6.QtWidgets import QFileDialog
+        save_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save File",
+            filename,
+            "All Files (*)"
+        )
+        
+        if not save_path:
+            return  # User cancelled
+        
         try:
-            if not self.file_client:
-                print("[DOWNLOAD] File client not available")
-                self.chat_widget.add_message("System", "File client not initialized", is_system=True)
-                return
-            
-            # Check if this file is available
-            if not hasattr(self, 'available_files') or fid not in self.available_files:
-                print(f"[DOWNLOAD] File {filename} not available")
-                self.chat_widget.add_message("System", f"File {filename} is no longer available", is_system=True)
-                return
-            
-            # Ask user where to save the file
-            print(f"[DOWNLOAD] Opening save dialog for {filename}")
-            from PyQt6.QtWidgets import QFileDialog
-            save_path, _ = QFileDialog.getSaveFileName(
-                self,
-                "Save File",
-                filename,
-                "All Files (*)"
-            )
-            
-            if not save_path:
-                print("[DOWNLOAD] User cancelled")
-                return  # User cancelled
-            
-            print(f"[DOWNLOAD] Save path selected: {save_path}")
-            
             # Start download in background
-            self.chat_widget.add_message("System", f"Preparing to download {filename}...", is_system=True)
+            self.chat_widget.add_message("System", f"Downloading {filename}...", is_system=True)
             
             # Store the save path in pending downloads
             # The actual download will be triggered when we receive the download port
@@ -1261,34 +1175,32 @@ class ClientMainWindow(QMainWindow):
             
             # Send file request message to server
             message = {
-                'type': MessageTypes.FILE_REQUEST,
+                'type': 'file_request',
                 'fid': fid
             }
-            print(f"[DOWNLOAD] Sending FILE_REQUEST message for fid={fid}")
             self.network_thread.send_message(message)
             
             self.chat_widget.add_message("System", f"Download request sent for {filename}", is_system=True)
             
         except Exception as e:
-            print(f"[ERROR] Error in on_download_file: {e}")
+            self.chat_widget.add_message("System", f"Failed to start download: {e}", is_system=True)
             import traceback
             traceback.print_exc()
-            try:
-                self.chat_widget.add_message("System", f"Failed to start download: {e}", is_system=True)
-            except:
-                # If we can't even add a message, something is seriously wrong
-                print("[ERROR] Cannot even add error message to chat")
     
-    def _on_download_complete(self, success: bool, error: str, result, filename: str, sender=None):
+    def _on_download_complete(self, success: bool, error: str, result, filename: str):
         """Handle download completion."""
         if success:
             self.chat_widget.add_message("System", f"📥 Download complete: {filename}", is_system=True)
         else:
             self.chat_widget.add_message("System", f"Download failed: {error}", is_system=True)
-        
-        # Schedule the sender thread for deletion
-        if sender:
-            sender.deleteLater()
+    
+    def _on_download_complete_with_cleanup(self, success: bool, error: str, result, filename: str, worker, fid: str):
+        """Handle download completion and cleanup worker."""
+        # Call the existing handler
+        self._on_download_complete(success, error, result, filename)
+        # Clean up the worker from the dictionary
+        if hasattr(self, 'download_workers') and fid in self.download_workers:
+            del self.download_workers[fid]
     
     def on_send_broadcast(self, text: str):
         """Send broadcast message."""
@@ -1376,6 +1288,10 @@ class ClientMainWindow(QMainWindow):
             self.chat_widget.add_message("System", f"No save path found for {filename}", is_system=True)
             return
         
+        # Remove from pending
+        if fid in self.file_client.pending_downloads:
+            del self.file_client.pending_downloads[fid]
+        
         # Start download in background using worker
         try:
             # Create download worker
@@ -1387,13 +1303,16 @@ class ClientMainWindow(QMainWindow):
                 port,
                 save_path
             )
-            # Connect with sender so we can clean it up
-            worker.task_done.connect(lambda success, error, result: self._on_download_complete(success, error, result, filename, worker))
-            worker.start()
+            # Store worker in dictionary to track downloads
+            if not hasattr(self, 'download_workers'):
+                self.download_workers = {}
+            self.download_workers[fid] = {'worker': worker, 'fid': fid, 'filename': filename}
             
-            # Remove from pending after starting download (not before)
-            if fid in self.file_client.pending_downloads:
-                del self.file_client.pending_downloads[fid]
+            worker.task_done.connect(
+                lambda success, error, result, worker_ref=worker, file_id=fid, fname=filename: 
+                self._on_download_complete_with_cleanup(success, error, result, fname, worker_ref, file_id)
+            )
+            worker.start()
         except Exception as e:
             self.chat_widget.add_message("System", f"Failed to start download: {e}", is_system=True)
             import traceback
@@ -1438,12 +1357,11 @@ class ClientMainWindow(QMainWindow):
             self.chat_widget.add_message("System", "Audio client not initialized", is_system=True)
             return
         
-        is_muted = "Unmute" in self.participant_panel.audio_btn.text()
-        
-        if is_muted:
+        if self.audio_muted:
             # Unmute (start) audio
             try:
                 self.audio_client.start_recording()
+                self.audio_muted = False
                 self.participant_panel.audio_btn.setText("🎤 Mute Audio")
                 self.chat_widget.add_message("System", "Audio unmuted", is_system=True)
             except Exception as e:
@@ -1452,6 +1370,7 @@ class ClientMainWindow(QMainWindow):
             # Mute (stop) audio
             try:
                 self.audio_client.stop_recording()
+                self.audio_muted = True
                 self.participant_panel.audio_btn.setText("🎤 Unmute Audio")
                 self.chat_widget.add_message("System", "Audio muted", is_system=True)
             except Exception as e:
@@ -1463,27 +1382,22 @@ class ClientMainWindow(QMainWindow):
             self.chat_widget.add_message("System", "Video client not initialized", is_system=True)
             return
         
-        is_streaming = "Stop" in self.participant_panel.video_btn.text()
-        
-        if is_streaming:
+        if self.video_streaming:
             # Stop video
             try:
                 self.video_client.stop_streaming()
+                self.video_streaming = False
                 self.participant_panel.video_btn.setText("📹 Start Video")
                 self.chat_widget.add_message("System", "Video stopped", is_system=True)
-                # Stop local video capture timer
-                if hasattr(self, 'local_video_timer'):
-                    self.local_video_timer.stop()
             except Exception as e:
                 self.chat_widget.add_message("System", f"Failed to stop video: {e}", is_system=True)
         else:
             # Start video
             try:
                 self.video_client.start_streaming()
+                self.video_streaming = True
                 self.participant_panel.video_btn.setText("📹 Stop Video")
                 self.chat_widget.add_message("System", "Video started", is_system=True)
-                # Start local video capture for GUI display
-                self._start_local_video_display()
             except Exception as e:
                 self.chat_widget.add_message("System", f"Failed to start video: {e}", is_system=True)
     
@@ -1493,37 +1407,37 @@ class ClientMainWindow(QMainWindow):
             self.chat_widget.add_message("System", "Screen presenter not initialized", is_system=True)
             return
         
-        is_sharing = "Stop" in self.participant_panel.share_btn.text()
-        
-        if is_sharing:
+        if self.screen_sharing:
             # Stop screen share
+            # Check if stop worker is already running
+            if self.screen_share_stop_worker is not None:
+                self.chat_widget.add_message("System", "Screen share stop already in progress", is_system=True)
+                return
+            
             try:
-                if self.network_thread and self.network_thread.loop:
-                    future = asyncio.run_coroutine_threadsafe(self.screen_presenter.stop_presentation(), self.network_thread.loop)
-                    result = future.result(timeout=5)
-                    if result:
-                        self._on_screen_share_stopped()
-                    else:
-                        self._on_screen_share_stopped("Failed to stop screen share")
-                else:
-                    self._on_screen_share_stopped("Network thread not available")
+                worker = AsyncTaskWorker(self.screen_presenter.stop_presentation)
+                # Capture worker in lambda to prevent race condition
+                worker.task_done.connect(lambda success, error, result, w=worker: self._on_screen_share_stopped_with_result(success, error, result, w))
+                self.screen_share_stop_worker = worker
+                worker.start()
             except Exception as e:
-                self._on_screen_share_stopped(str(e))
+                self.chat_widget.add_message("System", f"Failed to stop screen share: {e}", is_system=True)
+                self.screen_share_stop_worker = None
         else:
             # Start screen share
+            # Check if start worker is already running
+            if self.screen_share_start_worker is not None:
+                self.chat_widget.add_message("System", "Screen share start already in progress", is_system=True)
+                return
+            
             try:
-                if self.network_thread and self.network_thread.loop:
-                    future = asyncio.run_coroutine_threadsafe(self.screen_presenter.start_presentation(), self.network_thread.loop)
-                    result = future.result(timeout=5)
-                    if result:
-                        self._on_screen_share_started()
-                    else:
-                        self._on_screen_share_started("Failed to start screen share")
-                else:
-                    self._on_screen_share_started("Network thread not available")
+                worker = AsyncTaskWorker(self.screen_presenter.start_presentation)
+                # Capture worker in lambda to prevent race condition
+                worker.task_done.connect(lambda success, error, result, w=worker: self._on_screen_share_started_with_result(success, error, result, w))
+                self.screen_share_start_worker = worker
+                worker.start()
             except Exception as e:
-                self._on_screen_share_started(str(e))
-            finally:
+                self.chat_widget.add_message("System", f"Failed to start screen share: {e}", is_system=True)
                 self.screen_share_start_worker = None
     
     def _on_screen_share_started_with_result(self, success: bool, error: str, result, completing_worker=None):
@@ -1532,9 +1446,6 @@ class ClientMainWindow(QMainWindow):
         # Only clear worker reference if it's the same instance (prevents race condition)
         if completing_worker is not None and self.screen_share_start_worker is completing_worker:
             self.screen_share_start_worker = None
-        # Schedule the worker for deletion
-        if completing_worker:
-            completing_worker.deleteLater()
     
     def _on_screen_share_stopped_with_result(self, success: bool, error: str, result, completing_worker=None):
         """Handle screen share stopped result from worker."""
@@ -1542,15 +1453,13 @@ class ClientMainWindow(QMainWindow):
         # Only clear worker reference if it's the same instance (prevents race condition)
         if completing_worker is not None and self.screen_share_stop_worker is completing_worker:
             self.screen_share_stop_worker = None
-        # Schedule the worker for deletion
-        if completing_worker:
-            completing_worker.deleteLater()
     
     def _on_screen_share_started(self, error: str = None):
         """Handle screen share started."""
         if error:
             self.chat_widget.add_message("System", f"Failed to start screen share: {error}", is_system=True)
         else:
+            self.screen_sharing = True
             self.participant_panel.share_btn.setText("🖥️ Stop Screen Share")
             self.chat_widget.add_message("System", "Screen share started", is_system=True)
     
@@ -1559,147 +1468,9 @@ class ClientMainWindow(QMainWindow):
         if error:
             self.chat_widget.add_message("System", f"Failed to stop screen share: {error}", is_system=True)
         else:
+            self.screen_sharing = False
             self.participant_panel.share_btn.setText("🖥️ Start Screen Share")
             self.chat_widget.add_message("System", "Screen share stopped", is_system=True)
-    
-    def handle_present_start_broadcast(self, message: dict):
-        """Handle present start broadcast from another user."""
-        uid = message.get('uid')
-        username = message.get('username')
-        topic = message.get('topic', 'Screen Share')
-        viewer_port = message.get('viewer_port')
-        
-        # Don't show notification for our own presentation
-        if uid == self.uid:
-            return
-        
-        self.chat_widget.add_message("System", f"🎬 {username} started screen sharing: {topic}", is_system=True)
-        
-        # Store presentation info for potential viewing
-        if not hasattr(self, 'active_presentations'):
-            self.active_presentations = {}
-        
-        self.active_presentations[uid] = {
-            'username': username,
-            'topic': topic,
-            'viewer_port': viewer_port,
-            'uid': uid
-        }
-        
-        # Show dialog to ask if user wants to watch
-        reply = QMessageBox.question(
-            self,
-            'Screen Share Available',
-            f'{username} is sharing their screen.\n\nWould you like to watch?',
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.Yes
-        )
-        
-        if reply == QMessageBox.StandardButton.Yes:
-            self._watch_screen_share(uid, viewer_port, username)
-    
-    def _watch_screen_share(self, uid: int, viewer_port: int, username: str):
-        """Start watching a screen share."""
-        try:
-            if not self.screen_viewer:
-                self.chat_widget.add_message("System", "Screen viewer not initialized", is_system=True)
-                return
-            
-            self.chat_widget.add_message("System", f"Opening {username}'s screen...", is_system=True)
-            
-            # Import here to avoid circular imports
-            from PyQt6.QtWidgets import QApplication
-            from client.screen.screen_viewer import ScreenViewerWindow, SCREEN_SHARE_AVAILABLE
-            
-            # Create the viewer window in the GUI thread
-            if not SCREEN_SHARE_AVAILABLE:
-                self.chat_widget.add_message("System", "Screen sharing not available", is_system=True)
-                return
-            
-            # Get or create QApplication instance
-            app = QApplication.instance()
-            if not app:
-                app = QApplication(sys.argv)
-            
-            # Set the app instance for the viewer
-            self.screen_viewer.viewer_app = app
-            
-            # Create viewer window (must be done in GUI thread)
-            self.screen_viewer.viewer_window = ScreenViewerWindow(username)
-            self.screen_viewer.viewer_window.show()
-            
-            # Start receiving frames in a worker thread (network operations only)
-            worker = AsyncTaskWorker(
-                self.screen_viewer._receive_and_display_frames,
-                viewer_port,
-                username
-            )
-            worker.task_done.connect(
-                lambda success, error, result: self._on_screen_view_complete(success, error, result, username, worker)
-            )
-            worker.start()
-            
-        except Exception as e:
-            self.chat_widget.add_message("System", f"Failed to start screen viewing: {e}", is_system=True)
-            import traceback
-            traceback.print_exc()
-    
-    def _on_screen_view_complete(self, success: bool, error: str, result, username: str, sender=None):
-        """Handle screen view completion."""
-        if success:
-            self.chat_widget.add_message("System", f"Viewing {username}'s screen", is_system=True)
-        else:
-            self.chat_widget.add_message("System", f"Failed to view {username}'s screen: {error}", is_system=True)
-        # Schedule the sender thread for deletion
-        if sender:
-            sender.deleteLater()
-    
-    def handle_present_stop_broadcast(self, message: dict):
-        """Handle present stop broadcast from another user."""
-        uid = message.get('uid')
-        username = message.get('username')
-        
-        # Don't show notification for our own presentation
-        if uid == self.uid:
-            return
-        
-        self.chat_widget.add_message("System", f"{username} stopped screen sharing", is_system=True)
-        
-        # Remove from active presentations
-        if hasattr(self, 'active_presentations') and uid in self.active_presentations:
-            del self.active_presentations[uid]
-    
-    def _start_local_video_display(self):
-        """Start displaying local webcam feed in GUI."""
-        if not HAS_OPENCV or not self.video_client or not self.video_client.cap:
-            return
-        
-        # Create timer to capture and display local video
-        self.local_video_timer = QTimer()
-        self.local_video_timer.timeout.connect(self._update_local_video)
-        self.local_video_timer.start(33)  # ~30 FPS
-        print("[GUI] Started local video display timer")
-    
-    def _update_local_video(self):
-        """Update local video feed in GUI."""
-        try:
-            if not self.video_client or not self.video_client.cap or not self.video_client.is_streaming:
-                return
-            
-            # Capture frame from webcam
-            ret, frame = self.video_client.cap.read()
-            if not ret:
-                return
-            
-            # Resize to match video client settings
-            frame = cv2.resize(frame, (self.video_client.width, self.video_client.height))
-            
-            # Display in GUI (use own UID)
-            if self.uid:
-                self._on_frame_received(self.uid, frame)
-        
-        except Exception as e:
-            print(f"[GUI] Error updating local video: {e}")
     
     # ========================================================================
     # CLEANUP
@@ -1737,12 +1508,23 @@ class VideoReceiverThread(QThread):
     
     frame_received = pyqtSignal(int, object)  # uid, frame
     
-    def __init__(self, server_ip: str, server_port: int = 10001):
+    def __init__(self, server_ip: str, server_port: int = 0):
         super().__init__()
         self.server_ip = server_ip
-        self.server_port = server_port  # Port to receive video broadcasts
+        self.server_port = server_port  # 0 = bind to any available port
         self.socket = None
-        self.running = False
+        self._running = False
+        self._running_mutex = QMutex()
+    
+    def _is_running(self) -> bool:
+        """Thread-safe read of running flag."""
+        with QMutexLocker(self._running_mutex):
+            return self._running
+    
+    def _set_running(self, value: bool):
+        """Thread-safe write to running flag."""
+        with QMutexLocker(self._running_mutex):
+            self._running = value
     
     def run(self):
         """Run the video receiver loop."""
@@ -1752,27 +1534,22 @@ class VideoReceiverThread(QThread):
         
         try:
             self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            # Try to bind to the specified port
-            try:
-                self.socket.bind(('', self.server_port))
-                print(f"[VIDEO RECEIVER] Listening on port {self.server_port}")
-            except OSError as e:
-                # If binding fails, use an ephemeral port instead
-                self.socket.bind(('', 0))  # Let OS choose port
-                actual_port = self.socket.getsockname()[1]
-                print(f"[VIDEO RECEIVER] Could not bind to port {self.server_port}, using ephemeral port {actual_port}")
+            self.socket.bind(('', self.server_port))  # Bind to available port
+            # Get the actual port assigned
+            actual_port = self.socket.getsockname()[1]
             self.socket.settimeout(1.0)
-            self.running = True
+            self._set_running(True)
             
-            while self.running:
+            print(f"[VIDEO RECEIVER] Listening on port {actual_port}")
+            
+            while self._is_running():
                 try:
                     data, addr = self.socket.recvfrom(65536)
                     self._process_frame(data, addr)
                 except socket.timeout:
                     continue
                 except Exception as e:
-                    if self.running:
+                    if self._is_running():
                         print(f"[VIDEO RECEIVER] Error: {e}")
         finally:
             self.cleanup()
@@ -1786,15 +1563,10 @@ class VideoReceiverThread(QThread):
                 uid = hash(addr) % 0xFFFFFFFF
                 frame_only = frame_data
             else:
-                # Parse the 12-byte broadcast header: uid (4 bytes) + timestamp (8 bytes)
-                header = frame_data[:12]
+                # Extract uid from first 4 bytes (big-endian)
+                uid = struct.unpack('>I', frame_data[:4])[0]
+                # Skip 12-byte broadcast header (uid + timestamp)
                 frame_only = frame_data[12:]
-                try:
-                    uid, timestamp = struct.unpack('>I Q', header)
-                except struct.error as e:
-                    print(f"[VIDEO RECEIVER] Error parsing header: {e}")
-                    # Fallback: hash the address
-                    uid = hash(addr) % 0xFFFFFFFF
             
             # Decode JPEG frame
             nparr = np.frombuffer(frame_only, np.uint8)
@@ -1811,7 +1583,7 @@ class VideoReceiverThread(QThread):
     
     def stop(self):
         """Stop the receiver."""
-        self.running = False
+        self._set_running(False)
     
     def cleanup(self):
         """Clean up resources."""
@@ -1932,8 +1704,50 @@ class NetworkThread(QThread):
             asyncio.run_coroutine_threadsafe(self.send_message_async(message), self.loop)
     
     def stop(self):
-        """Stop network thread."""
-        self.running = False
+        """Stop network thread and close network resources."""
+        try:
+            self.running = False
+            
+            # If loop exists and is running, schedule cleanup and stop
+            if self.loop and not self.loop.is_closed():
+                # Close writer and stop loop
+                if self.writer:
+                    try:
+                        # Schedule writer close on the event loop and wait for completion
+                        future = asyncio.run_coroutine_threadsafe(
+                            self._close_writer(), 
+                            self.loop
+                        )
+                        # Block on the future result with timeout to ensure cleanup completes
+                        try:
+                            future.result(timeout=5.0)
+                        except asyncio.TimeoutError:
+                            print("[NETWORK] Warning: Writer close timed out after 5 seconds")
+                        except Exception as e:
+                            print(f"[NETWORK] Error waiting for writer close: {e}")
+                    except Exception as e:
+                        print(f"[NETWORK] Error scheduling writer close: {e}")
+                
+                # Stop the event loop
+                try:
+                    self.loop.call_soon_threadsafe(self.loop.stop)
+                except Exception as e:
+                    print(f"[NETWORK] Error stopping event loop: {e}")
+        except Exception as e:
+            print(f"[NETWORK] Error in stop(): {e}")
+    
+    async def _close_writer(self):
+        """Close writer gracefully."""
+        try:
+            if self.writer:
+                self.writer.close()
+                # Use timeout to prevent indefinite hanging
+                try:
+                    await asyncio.wait_for(self.writer.wait_closed(), timeout=5.0)
+                except asyncio.TimeoutError:
+                    print("[NETWORK] Warning: Writer wait_closed() timed out after 5 seconds")
+        except Exception as e:
+            print(f"[NETWORK] Error closing writer: {e}")
 
 
 # ============================================================================

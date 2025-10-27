@@ -757,8 +757,13 @@ class CollaborationClient:
             print(f"[ERROR] Server error: {error_msg}")
         
         else:
-            print(f"[DEBUG] Unknown message type: {msg_type}")
-            print(f"[DEBUG] Message: {message}")
+            # Unknown message type - log at debug level if logger is available
+            try:
+                from client.utils.logger import logger
+                logger.debug(f"Unknown message type: {msg_type}")
+                logger.debug(f"Message: {message}")
+            except Exception:
+                pass  # Fall back to silent handling if logger not available or logging fails
 
     async def handle_user_input(self, user_input: str):
         """Handle user input - commands or chat messages."""

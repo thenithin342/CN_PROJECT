@@ -150,16 +150,18 @@ def create_file_request_message(fid: str) -> Dict[str, Any]:
 
 def create_present_start_message(topic: str) -> Dict[str, Any]:
     """Create a present start message."""
+    from common.constants import MessageTypes
     return {
-        "type": "present_start",
+        "type": MessageTypes.PRESENT_START,
         "topic": topic
     }
 
 
 def create_present_stop_message() -> Dict[str, Any]:
     """Create a present stop message."""
+    from common.constants import MessageTypes
     return {
-        "type": "present_stop"
+        "type": MessageTypes.PRESENT_STOP
     }
 
 
@@ -282,8 +284,9 @@ def create_screen_share_ports_message(presenter_port: int, viewer_port: int) -> 
 
 def create_present_start_broadcast_message(uid: int, username: str, topic: str, viewer_port: int) -> Dict[str, Any]:
     """Create a present start broadcast message."""
+    from common.constants import MessageTypes
     return {
-        "type": "present_start",
+        "type": MessageTypes.PRESENT_START_BROADCAST,
         "uid": uid,
         "username": username,
         "topic": topic,
@@ -294,8 +297,9 @@ def create_present_start_broadcast_message(uid: int, username: str, topic: str, 
 
 def create_present_stop_broadcast_message(uid: int, username: str) -> Dict[str, Any]:
     """Create a present stop broadcast message."""
+    from common.constants import MessageTypes
     return {
-        "type": "present_stop",
+        "type": MessageTypes.PRESENT_STOP_BROADCAST,
         "uid": uid,
         "username": username,
         "timestamp": datetime.now().isoformat()

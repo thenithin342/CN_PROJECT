@@ -29,7 +29,7 @@ class ScreenServer:
         self.presenter_writer = None  # Presenter connection
         self.viewers: Dict[int, asyncio.StreamWriter] = {}  # uid -> viewer writer
         self.frame_relay_task = None
-        self.next_ephemeral_port = 10000
+        self.next_ephemeral_port = 11001  # Changed from 10000 to avoid conflict with video server
         self.lock = asyncio.Lock()  # Protect shared state
         self.participants = participants or {}  # Reference to participants dict
     
