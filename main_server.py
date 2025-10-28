@@ -13,7 +13,7 @@ Usage:
     python main_server.py
 
 Optional arguments:
-    --host HOST           Bind address (default: 0.0.0.0)
+    --host HOST           Bind address (default: primary local IPv4)
     --port PORT           Main TCP port (default: 9000)
     --audio-port PORT     Audio UDP port (default: 11000)
     --video-port PORT     Video UDP port (default: 10000)
@@ -31,8 +31,8 @@ if __name__ == "__main__":
     
     # Parse command line arguments
     parser = argparse.ArgumentParser(description='LAN Collaboration Server')
-    parser.add_argument('--host', type=str, default='0.0.0.0',
-                       help='Host to bind to (default: 0.0.0.0)')
+    parser.add_argument('--host', type=str, default=None,
+                       help='Host to bind to (default: primary local IPv4)')
     parser.add_argument('--port', type=int, default=9000,
                        help='TCP port for main server (default: 9000)')
     parser.add_argument('--audio-port', type=int, default=11000,
@@ -44,16 +44,33 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
+    # Determine default host if not provided: pick primary local IPv4
+    def _get_primary_local_ip():
+        try:
+            import socket
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+                # This does not actually send data to the internet, it's just to select the default interface
+                s.connect(('8.8.8.8', 80))
+                return s.getsockname()[0]
+        except Exception:
+            try:
+                return socket.gethostbyname(socket.gethostname())
+            except Exception:
+                return '127.0.0.1'
+
+    chosen_host = args.host or _get_primary_local_ip()
+
     # Create and start the server
     server = None
     try:
         server = CollaborationServer(
-            host=args.host,
+            host=chosen_host,
             port=args.port,
             audio_port=args.audio_port,
             video_port=args.video_port,
             upload_dir=args.upload_dir
         )
+        logger.info(f"Server binding to {chosen_host}:{args.port}")
         asyncio.run(server.start())
     except KeyboardInterrupt:
         logger.info("Server shutting down...")
