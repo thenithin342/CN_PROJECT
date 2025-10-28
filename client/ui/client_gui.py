@@ -1075,22 +1075,46 @@ class ClientMainWindow(QMainWindow):
         try:
             # Initialize client modules
             print(f"[GUI] Initializing client modules for uid={self.uid}")
-            self.audio_client = AudioClient(server_ip=self.server_host, server_port=11000, uid=self.uid)
-            self.video_client = VideoClient(server_ip=self.server_host, server_port=10000, uid=self.uid)
             
-            # Ensure UID is set on video client (should already be set from constructor, but double-check)
-            self.video_client.set_uid(self.uid)
-            print(f"[GUI] Video client UID set to {self.uid}")
+            # Try to initialize audio client (only if opuslib is available)
+            if HAS_OPUS:
+                try:
+                    self.audio_client = AudioClient(server_ip=self.server_host, server_port=11000, uid=self.uid)
+                    print("[GUI] Audio client initialized")
+                except Exception as e:
+                    print(f"[GUI] Failed to initialize audio client: {e}")
+                    self.audio_client = None
+            else:
+                print("[GUI] Audio client skipped (opuslib not available)")
+                self.audio_client = None
             
-            # Set up frame received callback - when video client receives a frame from another client, display it
-            self.video_client.set_frame_received_callback(self._on_frame_received)
-            print(f"[GUI] Frame callback set on video client")
-
-            # Start passive receiving so we can view others even if we don't stream
-            try:
-                self.video_client.start_receiving()
-            except Exception as e:
-                print(f"[GUI] Failed to start passive video receiver: {e}")
+            # Try to initialize video client (only if OpenCV is available)
+            if HAS_OPENCV:
+                try:
+                    self.video_client = VideoClient(server_ip=self.server_host, server_port=10000, uid=self.uid)
+                    print("[GUI] Video client initialized")
+                except Exception as e:
+                    print(f"[GUI] Failed to initialize video client: {e}")
+                    self.video_client = None
+            else:
+                print("[GUI] Video client skipped (OpenCV not available)")
+                self.video_client = None
+            
+            # If video client was initialized, configure it
+            if self.video_client:
+                # Ensure UID is set on video client (should already be set from constructor, but double-check)
+                self.video_client.set_uid(self.uid)
+                print(f"[GUI] Video client UID set to {self.uid}")
+                
+                # Set up frame received callback - when video client receives a frame from another client, display it
+                self.video_client.set_frame_received_callback(self._on_frame_received)
+                print(f"[GUI] Frame callback set on video client")
+                
+                # Start passive receiving so we can view others even if we don't stream
+                try:
+                    self.video_client.start_receiving()
+                except Exception as e:
+                    print(f"[GUI] Failed to start passive video receiver: {e}")
 
             # Also start a compatibility UDP receiver on the fixed broadcast port (10001)
             # as a fallback path to ensure frames are displayed even if ephemeral port path fails.
