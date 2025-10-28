@@ -408,8 +408,8 @@ class ParticipantPanel(QWidget):
         # Store parent reference for callbacks
         self.parent_window = None
         
-        # Audio button
-        self.audio_btn = QPushButton("🎤 Mute Audio")
+        # Audio button - starts as muted (button says "Unmute")
+        self.audio_btn = QPushButton("🎤 Unmute Audio")
         self.audio_btn.clicked.connect(self.toggle_audio)
         layout.addWidget(self.audio_btn)
         
@@ -1736,21 +1736,31 @@ class ClientMainWindow(QMainWindow):
         is_muted = "Unmute" in self.participant_panel.audio_btn.text()
         
         if is_muted:
-            # Unmute (start) audio
+            # Unmute (start) audio - only now will audio start recording
             try:
-                self.audio_client.start_recording()
+                if not self.audio_client.is_recording:
+                    self.audio_client.start_recording()
+                    print("[GUI] Audio recording started")
                 self.participant_panel.audio_btn.setText("🎤 Mute Audio")
-                self.chat_widget.add_message("System", "Audio unmuted", is_system=True)
+                self.chat_widget.add_message("System", "Audio unmuted - microphone is now active", is_system=True)
             except Exception as e:
                 self.chat_widget.add_message("System", f"Failed to start audio: {e}", is_system=True)
+                print(f"[GUI] Audio start error: {e}")
+                import traceback
+                traceback.print_exc()
         else:
             # Mute (stop) audio
             try:
-                self.audio_client.stop_recording()
+                if self.audio_client.is_recording:
+                    self.audio_client.stop_recording()
+                    print("[GUI] Audio recording stopped")
                 self.participant_panel.audio_btn.setText("🎤 Unmute Audio")
-                self.chat_widget.add_message("System", "Audio muted", is_system=True)
+                self.chat_widget.add_message("System", "Audio muted - microphone is off", is_system=True)
             except Exception as e:
                 self.chat_widget.add_message("System", f"Failed to stop audio: {e}", is_system=True)
+                print(f"[GUI] Audio stop error: {e}")
+                import traceback
+                traceback.print_exc()
     
     def on_toggle_video(self):
         """Toggle video streaming."""
