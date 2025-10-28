@@ -59,10 +59,13 @@ class AssembledFrame:
 class ClientVideoInfo:
     """Information about a video client."""
 
-    def __init__(self, uid: int, address: Tuple[str, int]):
+    def __init__(self, uid: int, address: Optional[Tuple[str, int]] = None, receive_port: Optional[int] = None):
         """Initialize client info."""
         self.uid = uid
         self.address = address  # Client's IP and port for sending chunks
+        self.ip = address[0] if address else None  # Client's IP address
+        self.send_port = address[1] if address else None  # Port client uses to send chunks
+        self.receive_port = receive_port  # Client's ephemeral port for receiving video
         self.last_packet_time = time.time()
         self.received_frames = 0
         self.total_bytes = 0
@@ -117,13 +120,16 @@ class VideoServer:
         # Broadcasting
         self.broadcast_queue = deque()
         self.broadcast_lock = threading.Lock()
+        
+        # Registration packet magic prefix for receiver-only clients
+        self.REGISTER_MAGIC = b'VGPR'  # Video Global Port Registration
     
     def _parse_chunk_header(self, data: bytes) -> Optional[Tuple]:
         """
         Parse chunk header from packet data.
         
         Returns:
-            Tuple of (uid, frame_id, chunk_idx, total_chunks, seq, timestamp, chunk_size, payload)
+            Tuple of (uid, frame_id, chunk_idx, total_chunks, seq, timestamp, chunk_size, receive_port, payload)
             or None if header is invalid
         """
         if len(data) < self.CHUNK_HEADER_SIZE:
@@ -183,8 +189,8 @@ class VideoServer:
                     print(f"[VIDEO SERVER] Discarding frame {chunk.frame_id} from uid={chunk.uid}: too many concurrent frames (max={self.MAX_FRAMES_PER_CLIENT})")
                     return
                 
-                # Estimate frame size and check against max
-                estimated_size = chunk.total_chunks * chunk.chunk_size
+                # Estimate max frame size using the first chunk size as baseline
+                estimated_size = chunk.total_chunks * max(1, chunk.chunk_size)
                 if estimated_size > self.MAX_FRAME_SIZE:
                     print(f"[VIDEO SERVER] Discarding frame {chunk.frame_id} from uid={chunk.uid}: estimated size {estimated_size} exceeds limit {self.MAX_FRAME_SIZE}")
                     return
@@ -192,7 +198,7 @@ class VideoServer:
                 # Pre-allocate list of None values for all chunks
                 chunk_list = [None] * chunk.total_chunks
                 # Store: (chunk_list, total_chunks, chunk_size, remaining_count)
-                # We store chunk_size to validate incoming chunks match the original
+                # We store baseline chunk_size from first chunk; last chunk may be smaller
                 self.chunk_buffers[chunk.uid][chunk.frame_id] = (chunk_list, chunk.total_chunks, chunk.chunk_size, chunk.total_chunks)
                 self.chunk_timeouts[chunk.uid][chunk.frame_id] = time.time()
             
@@ -205,9 +211,17 @@ class VideoServer:
                 print(f"[VIDEO SERVER] Discarding chunk: total_chunks mismatch (incoming={chunk.total_chunks}, stored={stored_total_chunks})")
                 return
             
-            if chunk.chunk_size != stored_chunk_size:
-                print(f"[VIDEO SERVER] Discarding chunk: chunk_size mismatch (incoming={chunk.chunk_size}, stored={stored_chunk_size})")
-                return
+            # Allow the last chunk to be smaller than the original chunk size.
+            # For non-last chunks, enforce the size to match the first observed chunk size.
+            if chunk.chunk_idx < stored_total_chunks - 1:
+                if stored_chunk_size != 0 and chunk.chunk_size != stored_chunk_size:
+                    print(f"[VIDEO SERVER] Discarding chunk: chunk_size mismatch (incoming={chunk.chunk_size}, stored={stored_chunk_size})")
+                    return
+            else:
+                # Last chunk: must be positive and not exceed the stored size
+                if chunk.chunk_size <= 0 or (stored_chunk_size != 0 and chunk.chunk_size > stored_chunk_size):
+                    print(f"[VIDEO SERVER] Discarding last chunk: invalid size (incoming={chunk.chunk_size}, stored={stored_chunk_size})")
+                    return
             
             # Validate chunk_idx is within bounds using stored total_chunks
             if chunk.chunk_idx >= stored_total_chunks:
@@ -266,6 +280,30 @@ class VideoServer:
     async def handle_packet(self, data: bytes, addr: Tuple[str, int]):
         """Handle incoming UDP packet from client."""
         try:
+            # Handle receiver registration packets first
+            if len(data) >= 12 and data[:4] == self.REGISTER_MAGIC:
+                try:
+                    # Format: 4 bytes magic + uid (4) + receive_port (4) in big-endian
+                    _, uid, receive_port = struct.unpack('>4s I I', data[:12])
+                except struct.error as e:
+                    print(f"[VIDEO SERVER] Bad registration packet from {addr}: {e}")
+                    return
+
+                with self.client_lock:
+                    if uid in self.clients:
+                        client = self.clients[uid]
+                        client.address = addr  # update latest seen addr
+                        client.ip = addr[0]  # update IP
+                        client.receive_port = receive_port
+                        client.last_packet_time = time.time()
+                        print(f"[VIDEO SERVER] Updated registration for uid={uid} -> {addr[0]}:{receive_port}")
+                    else:
+                        client = ClientVideoInfo(uid, addr, receive_port)
+                        self.clients[uid] = client
+                        print(f"[VIDEO SERVER] Registered receiver uid={uid} at {addr[0]}:{receive_port}")
+                        print(f"[VIDEO SERVER] Total clients now: {len(self.clients)}")
+                return
+
             # Parse chunk header
             header_info = self._parse_chunk_header(data)
             if header_info is None:
@@ -273,22 +311,33 @@ class VideoServer:
                 return
             
             uid, frame_id, chunk_idx, total_chunks, seq, timestamp, chunk_size, receive_port, payload = header_info
-            print(f"[VIDEO SERVER] Received chunk: uid={uid}, frame={frame_id}, chunk={chunk_idx+1}/{total_chunks}")
+            # Only print every 100th chunk to reduce spam
+            if chunk_idx % 100 == 0 or chunk_idx == 0:
+                print(f"[VIDEO SERVER] Received chunk: uid={uid}, frame={frame_id}, chunk={chunk_idx+1}/{total_chunks}")
             
             # Update or add client
             with self.client_lock:
                 if uid in self.clients:
                     client = self.clients[uid]
-                    client.address = addr
-                    client.receive_port = receive_port
+                    # Update IP from the latest packet (but keep receive_port from registration)
+                    # The addr[0] is the client's IP, which we need for broadcasting
+                    client.ip = addr[0]
+                    client.send_port = addr[1]  # Port used for sending chunks
+                    if receive_port and receive_port > 0:
+                        client.receive_port = receive_port
                     client.last_packet_time = time.time()
+                    # Only print every 1000 chunks to reduce spam
+                    if chunk_idx % 1000 == 0:
+                        print(f"[VIDEO SERVER] Updated client uid={uid}: ip={addr[0]}, receive_port={client.receive_port}")
                 else:
                     # New client
-                    client = ClientVideoInfo(uid, addr)
-                    client.receive_port = receive_port
+                    client = ClientVideoInfo(uid, addr, receive_port)
+                    client.ip = addr[0]  # Store IP separately
+                    client.send_port = addr[1]  # Store send port separately
                     self.clients[uid] = client
                     print(f"[VIDEO SERVER] New video client connected: uid={uid} from {addr}")
                     print(f"[VIDEO SERVER] Client {uid} will receive broadcasts on {addr[0]}:{receive_port}")
+                    print(f"[VIDEO SERVER] Total clients now: {len(self.clients)}")
             
             # Create chunk object
             chunk = VideoFrameChunk(
@@ -326,19 +375,24 @@ class VideoServer:
                     await asyncio.sleep(0.001)  # Reduced sleep for faster processing
                     continue
 
-                print(f"[VIDEO SERVER] Broadcasting frame {assembled_frame.frame_id} from uid={assembled_frame.uid}")
-
                 # Broadcast to all clients except sender
                 with self.client_lock:
                     active_clients = list(self.clients.values())
-
-                print(f"[VIDEO SERVER] Active clients: {[c.uid for c in active_clients]}, sender uid={assembled_frame.uid}")
+                
+                # Only print broadcast info occasionally
+                if assembled_frame.frame_id % 30 == 0:
+                    print(f"[VIDEO SERVER] All clients: {[(c.uid, c.ip, c.receive_port) for c in active_clients]}")
+                    print(f"[VIDEO SERVER] Broadcasting frame {assembled_frame.frame_id} from uid={assembled_frame.uid} to {len(active_clients)-1} clients")
 
                 broadcast_count = 0
                 for client in active_clients:
                     if client.uid == assembled_frame.uid:
                         # Don't send back to sender
-                        print(f"[VIDEO SERVER] Skipping sender uid={client.uid}")
+                        continue
+                    
+                    # Skip if receive port is not set
+                    if not client.receive_port:
+                        print(f"[VIDEO SERVER] ERROR: Skipping client uid={client.uid} - receive_port not set")
                         continue
 
                     try:
@@ -350,16 +404,19 @@ class VideoServer:
 
                         # Send header + frame data to the client's receive port
                         packet_data = broadcast_header + assembled_frame.data
-                        broadcast_addr = (client.address[0], client.receive_port)
+                        broadcast_addr = (client.ip, client.receive_port)
+                        print(f"[VIDEO SERVER] Sending frame to client uid={client.uid} at {broadcast_addr}, packet_size={len(packet_data)}")
                         await loop.sock_sendto(self.broadcast_socket, packet_data, broadcast_addr)
                         broadcast_count += 1
-                        print(f"[VIDEO SERVER] Sent frame from uid={assembled_frame.uid} to uid={client.uid} at {broadcast_addr} (size={len(packet_data)} bytes)")
+                        print(f"[VIDEO SERVER] Frame sent successfully")
                     except Exception as e:
                         print(f"[VIDEO SERVER] Error broadcasting to uid={client.uid} at {broadcast_addr}: {e}")
                         import traceback
                         traceback.print_exc()
 
-                print(f"[VIDEO SERVER] Broadcasted to {broadcast_count} clients")
+                # Only print every 30 frames to reduce spam
+                if assembled_frame.frame_id % 30 == 0:
+                    print(f"[VIDEO SERVER] Broadcasted to {broadcast_count} clients")
 
             except Exception as e:
                 print(f"[VIDEO SERVER] Error in broadcast worker: {e}")

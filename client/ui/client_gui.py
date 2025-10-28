@@ -29,7 +29,8 @@ from collections import deque
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QGridLayout, QLabel, QPushButton, QTextEdit, QTextBrowser, QLineEdit, QListWidget,
-    QListWidgetItem, QProgressBar, QFileDialog, QMessageBox, QInputDialog, QSizePolicy
+    QListWidgetItem, QProgressBar, QFileDialog, QMessageBox, QInputDialog, QSizePolicy,
+    QMenu, QDialog
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QSize, QTimer, QMutex, QUrl
 from PyQt6.QtGui import QImage, QPixmap, QFont, QPalette, QColor
@@ -96,10 +97,13 @@ class VideoFrame(QLabel):
         self.uid = uid
         self.username = username or f"User {uid}"
         self.current_frame = None
+        # Lock the draw size after the first frame to prevent any zooming
+        self._locked_draw_size = None  # type: Optional[QSize]
         self.setup_ui()
     
     def setup_ui(self):
         """Setup the UI for video frame."""
+        # Responsive sizing so the grid layout remains balanced
         self.setMinimumSize(320, 240)
         self.setMaximumSize(640, 480)
         self.setStyleSheet("""
@@ -116,31 +120,61 @@ class VideoFrame(QLabel):
     def update_frame(self, frame: np.ndarray):
         """Update with new frame data."""
         try:
+            if frame is None or frame.size == 0:
+                return
+                
             self.current_frame = frame
             
             # Convert OpenCV BGR to RGB
             frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             height, width, channel = frame_rgb.shape
+            
+            if height <= 0 or width <= 0:
+                print(f"[VIDEO FRAME] Invalid frame dimensions: {width}x{height}")
+                return
+            
             bytes_per_line = 3 * width
             
             # Create QImage
             q_image = QImage(frame_rgb.data, width, height, bytes_per_line, QImage.Format.Format_RGB888)
             
-            # Create QPixmap and scale
+            # Create QPixmap
             pixmap = QPixmap.fromImage(q_image)
-            scaled_pixmap = pixmap.scaled(
-                self.size(),
-                Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation
-            )
             
+            # Determine and lock the draw size on first frame to avoid any zooming later
+            if self._locked_draw_size is None:
+                # Compute the largest size that fits inside the current label size with aspect preserved
+                target_size = self.size()
+                if target_size.width() <= 0 or target_size.height() <= 0:
+                    # Fallback to a sane default
+                    target_size = QSize(640, 360)
+                self._locked_draw_size = target_size
+            
+            # Scale to the locked draw size, keeping aspect ratio, using fast transform to avoid smoothing/animation
+            scaled_pixmap = pixmap.scaled(
+                self._locked_draw_size,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.FastTransformation
+            )
             self.setPixmap(scaled_pixmap)
-            print(f"[VIDEO FRAME] Successfully updated frame for uid={self.uid}, size={width}x{height}")
             
         except Exception as e:
-            print(f"[VIDEO FRAME] Error updating frame: {e}")
-            import traceback
-            traceback.print_exc()
+            print(f"[VIDEO FRAME] Error updating frame for uid={self.uid}: {e}")
+            # Don't print full traceback for every frame error to avoid spam
+            if not hasattr(self, '_last_error_time') or (time.time() - self._last_error_time) > 5:
+                import traceback
+                traceback.print_exc()
+                self._last_error_time = time.time()
+
+    def clear_display(self):
+        """Reset label to placeholder without any image."""
+        try:
+            self.current_frame = None
+            self.setPixmap(QPixmap())
+            self.setText(f"{self.username}")
+            self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        except Exception as e:
+            print(f"[VIDEO FRAME] Error clearing display for uid={self.uid}: {e}")
 
 
 class VideoGridWidget(QWidget):
@@ -154,6 +188,10 @@ class VideoGridWidget(QWidget):
         self.is_video_active = False  # Track if we're receiving active video
         self.last_frame_time = {}  # Track last frame time per uid
         self.setup_ui()
+        # Periodic timer to clear stale feeds (when a sender stops video)
+        self._stale_check_timer = QTimer(self)
+        self._stale_check_timer.timeout.connect(self._check_stale_feeds)
+        self._stale_check_timer.start(1000)
     
     def setup_ui(self):
         """Setup the video grid layout."""
@@ -181,18 +219,26 @@ class VideoGridWidget(QWidget):
         if uid not in self.video_frames:
             return
         
-        frame = self.video_frames[uid]
-        self.layout().removeWidget(frame)
-        frame.deleteLater()
-        del self.video_frames[uid]
-        
-        # Reset video active flag if no feeds remain
-        if uid in self.last_frame_time:
-            del self.last_frame_time[uid]
-        if not self.last_frame_time:
-            self.is_video_active = False
-        
-        self.update_grid_layout()
+        try:
+            frame = self.video_frames[uid]
+            self.layout().removeWidget(frame)
+            frame.deleteLater()
+            del self.video_frames[uid]
+            
+            # Reset video active flag if no feeds remain
+            if uid in self.last_frame_time:
+                del self.last_frame_time[uid]
+            if not self.last_frame_time:
+                self.is_video_active = False
+            
+            self.update_grid_layout()
+        except Exception as e:
+            print(f"[VIDEO GRID] Error removing video feed for uid={uid}: {e}")
+            # Try to clean up anyway
+            if uid in self.video_frames:
+                del self.video_frames[uid]
+            if uid in self.last_frame_time:
+                del self.last_frame_time[uid]
     
     def update_grid_layout(self):
         """Update the grid layout based on number of feeds."""
@@ -222,9 +268,40 @@ class VideoGridWidget(QWidget):
     def update_frame(self, uid: int, frame: np.ndarray):
         """Update frame for a specific user."""
         if uid in self.video_frames:
-            self.is_video_active = True
-            self.last_frame_time[uid] = time.time()
-            self.video_frames[uid].update_frame(frame)
+            try:
+                self.is_video_active = True
+                self.last_frame_time[uid] = time.time()
+                self.video_frames[uid].update_frame(frame)
+            except Exception as e:
+                print(f"[VIDEO GRID] Error updating frame for uid={uid}: {e}")
+                # Don't fail silently, but don't spam either
+                import traceback
+                traceback.print_exc()
+
+    def reset_feed(self, uid: int):
+        """Reset a user's feed to the placeholder state."""
+        try:
+            if uid in self.video_frames:
+                self.video_frames[uid].clear_display()
+                if uid in self.last_frame_time:
+                    del self.last_frame_time[uid]
+                # Do not remove the tile; just reset visuals
+        except Exception as e:
+            print(f"[VIDEO GRID] Error resetting feed for uid={uid}: {e}")
+
+    def _check_stale_feeds(self):
+        """Clear tiles that haven't received frames recently."""
+        try:
+            now = time.time()
+            stale_threshold = 2.5  # seconds with no frames -> consider stopped
+            stale_uids = []
+            for uid, last_time in list(self.last_frame_time.items()):
+                if now - last_time > stale_threshold:
+                    stale_uids.append(uid)
+            for uid in stale_uids:
+                self.reset_feed(uid)
+        except Exception as e:
+            print(f"[VIDEO GRID] Error during stale feed check: {e}")
 
 
 # ============================================================================
@@ -418,6 +495,7 @@ class ChatWidget(QWidget):
     file_upload = pyqtSignal(str)  # file path
     broadcast_sent = pyqtSignal(str)  # message text
     unicast_sent = pyqtSignal(int, str)  # target_uid, message text
+    multicast_sent = pyqtSignal(object, str)  # target_uids(list[int]) or None to select, message text
     file_download_requested = pyqtSignal(str, str)  # fid, filename
     
     def __init__(self):
@@ -543,43 +621,28 @@ class ChatWidget(QWidget):
         """)
         input_layout.addWidget(file_btn)
         
-        # Broadcast button
-        broadcast_btn = QPushButton("📢")
-        broadcast_btn.setToolTip("Send Broadcast Message")
-        broadcast_btn.clicked.connect(self.send_broadcast)
-        broadcast_btn.setMaximumWidth(50)
-        broadcast_btn.setStyleSheet("""
+        # Send-To menu button for accessibility: Unicast, Multicast, Broadcast
+        send_to_btn = QPushButton("Send To ▾")
+        send_to_btn.setToolTip("Choose recipients: Unicast, Multicast, Broadcast")
+        send_to_btn.setStyleSheet("""
             QPushButton {
-                background-color: #E74C3C;
+                background-color: #2ECC71;
                 color: white;
                 border: none;
-                padding: 8px;
+                padding: 8px 12px;
                 border-radius: 5px;
+                font-weight: bold;
             }
             QPushButton:hover {
-                background-color: #C0392B;
+                background-color: #27AE60;
             }
         """)
-        input_layout.addWidget(broadcast_btn)
-        
-        # Private message button
-        private_btn = QPushButton("🔒")
-        private_btn.setToolTip("Send Private Message")
-        private_btn.clicked.connect(self.send_private)
-        private_btn.setMaximumWidth(50)
-        private_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #9B59B6;
-                color: white;
-                border: none;
-                padding: 8px;
-                border-radius: 5px;
-            }
-            QPushButton:hover {
-                background-color: #8E44AD;
-            }
-        """)
-        input_layout.addWidget(private_btn)
+        menu = QMenu(send_to_btn)
+        menu.addAction("Broadcast", self.send_broadcast)
+        menu.addAction("Private (Unicast)", self.send_private)
+        menu.addAction("Multicast", self.send_multicast)
+        send_to_btn.setMenu(menu)
+        input_layout.addWidget(send_to_btn)
         
         layout.addLayout(input_layout)
         
@@ -618,6 +681,14 @@ class ChatWidget(QWidget):
         if text:
             # Signal that will be handled by parent to select recipient
             self.unicast_sent.emit(None, text)  # None means need to select
+            self.input_field.clear()
+    
+    def send_multicast(self):
+        """Send multicast message (select multiple recipients)."""
+        text = self.input_field.text().strip()
+        if text:
+            # None for targets indicates the main window should prompt for selection
+            self.multicast_sent.emit(None, text)
             self.input_field.clear()
     
     def add_message(self, username: str, message: str, is_system: bool = False):
@@ -722,6 +793,9 @@ class ChatWidget(QWidget):
 class ClientMainWindow(QMainWindow):
     """Main application window."""
     
+    # Signal to marshal video frames to the GUI thread
+    frame_received_signal = pyqtSignal(int, object)  # uid, frame
+
     def __init__(self, server_host: str = 'localhost', server_port: int = 9000):
         super().__init__()
         self.server_host = server_host
@@ -753,6 +827,7 @@ class ClientMainWindow(QMainWindow):
         self.upload_worker = None
         self.screen_share_start_worker = None
         self.screen_share_stop_worker = None
+        self.active_workers = []  # Track all active workers for proper cleanup
         
         # Setup UI
         self.setup_ui()
@@ -763,6 +838,9 @@ class ClientMainWindow(QMainWindow):
         
         # Connect video receiver
         self.setup_video_receiver()
+
+        # Connect cross-thread frame signal to a main-thread slot
+        self.frame_received_signal.connect(self._enqueue_frame_main_thread)
         
         # Setup heartbeat timer to keep participants synced
         self.setup_heartbeat_timer()
@@ -814,6 +892,7 @@ class ClientMainWindow(QMainWindow):
         self.chat_widget.file_upload.connect(self.on_upload_file)
         self.chat_widget.broadcast_sent.connect(self.on_send_broadcast)
         self.chat_widget.unicast_sent.connect(self.on_send_unicast)
+        self.chat_widget.multicast_sent.connect(self.on_send_multicast)
         self.chat_widget.file_download_requested.connect(self.on_download_file)
     
     def connect_signals(self):
@@ -888,33 +967,78 @@ class ClientMainWindow(QMainWindow):
         # We don't need a separate VideoReceiverThread anymore
         print("[GUI] Video receiving is handled by video_client using ephemeral ports")
         self.video_receiver_thread = None  # Not used anymore
+        
+        # Create a QTimer for thread-safe frame updates
+        self.video_update_timer = QTimer()
+        self.video_update_timer.timeout.connect(self._process_pending_frames)
+        self.pending_frames = {}  # uid -> frame queue
+        self.frame_lock = threading.Lock()
     
     def _on_frame_received(self, uid, frame):
-        """Handle received frame - called from video receiver thread."""
+        """Called from background thread; relay to main thread via signal."""
         try:
-            print(f"[GUI] Frame received for uid={uid}, frame shape={frame.shape}")
-            
-            # Ensure the video feed exists in the grid
-            if uid not in self.video_grid.video_frames:
-                # Get username from participants
-                username = self.get_username_by_uid(uid) if uid in self.participants else f"User {uid}"
-                # Mark it as "You" if it's our own feed
-                if uid == self.uid and "(You)" not in username:
-                    username = f"{username} (You)"
-                print(f"[GUI] Adding NEW video feed for uid={uid}, username={username}")
-                self.video_grid.add_video_feed(uid, username)
-            
-            # Update the frame
-            self.video_grid.update_frame(uid, frame)
-            print(f"[GUI] Successfully updated video frame for uid={uid}")
+            self.frame_received_signal.emit(uid, frame)
         except Exception as e:
-            print(f"[GUI] Error in _on_frame_received: {e}")
+            print(f"[GUI] Error emitting frame signal for uid={uid}: {e}")
+            import traceback
+            traceback.print_exc()
+
+    def _enqueue_frame_main_thread(self, uid, frame):
+        """Main-thread slot to enqueue frame and ensure GUI timer runs."""
+        try:
+            with self.frame_lock:
+                self.pending_frames[uid] = frame
+            if not self.video_update_timer.isActive():
+                self.video_update_timer.start(16)
+                print(f"[GUI] Started video update timer for uid={uid}")
+        except Exception as e:
+            print(f"[GUI] Error enqueuing frame on main thread for uid={uid}: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    def _process_pending_frames(self):
+        """Process pending frames on the main GUI thread."""
+        try:
+            # Get all pending frames in a thread-safe way
+            frames_to_process = {}
+            with self.frame_lock:
+                if not self.pending_frames:
+                    # No pending frames, stop timer
+                    self.video_update_timer.stop()
+                    return
+                frames_to_process = self.pending_frames.copy()
+                self.pending_frames.clear()
+            
+            # Process each frame on the main thread
+            for uid, frame in frames_to_process.items():
+                # Ensure the video feed exists in the grid
+                if uid not in self.video_grid.video_frames:
+                    # Get username from participants
+                    username = self.get_username_by_uid(uid) if uid in self.participants else f"User {uid}"
+                    # Mark it as "You" if it's our own feed
+                    if uid == self.uid and "(You)" not in username:
+                        username = f"{username} (You)"
+                    self.video_grid.add_video_feed(uid, username)
+                
+                # Update the frame on the main thread
+                self.video_grid.update_frame(uid, frame)
+                
+        except Exception as e:
+            print(f"[GUI] Error processing pending frames: {e}")
             import traceback
             traceback.print_exc()
     
     def stop_video_receiver(self):
         """Stop receiving video."""
-        # Video receiver is now part of video_client, no need to stop separately
+        # Stop the video update timer
+        if hasattr(self, 'video_update_timer'):
+            self.video_update_timer.stop()
+        
+        # Clear pending frames
+        with self.frame_lock:
+            self.pending_frames.clear()
+        
+        # Video receiver is now part of video_client, which will be cleaned up separately
         pass
     
     def initialize_client_modules(self):
@@ -922,6 +1046,12 @@ class ClientMainWindow(QMainWindow):
         if not self.network_thread or not self.network_thread.writer:
             print("[ERROR] Writer not available, cannot initialize client modules")
             self.chat_widget.add_message("System", "Failed to initialize client modules - connection issue", is_system=True)
+            return
+        
+        # Verify UID is set before initializing video client
+        if not self.uid:
+            print("[ERROR] UID not set, cannot initialize video client")
+            self.chat_widget.add_message("System", "Failed to initialize - UID not set", is_system=True)
             return
         
         # Get writer from network thread
@@ -932,22 +1062,40 @@ class ClientMainWindow(QMainWindow):
             print(f"[GUI] Initializing client modules for uid={self.uid}")
             self.audio_client = AudioClient(server_ip=self.server_host, server_port=11000, uid=self.uid)
             self.video_client = VideoClient(server_ip=self.server_host, server_port=10000, uid=self.uid)
-            # Ensure UID is set on video client
-            if self.uid:
-                self.video_client.set_uid(self.uid)
-                print(f"[GUI] Video client UID set to {self.uid}")
+            
+            # Ensure UID is set on video client (should already be set from constructor, but double-check)
+            self.video_client.set_uid(self.uid)
+            print(f"[GUI] Video client UID set to {self.uid}")
             
             # Set up frame received callback - when video client receives a frame from another client, display it
             self.video_client.set_frame_received_callback(self._on_frame_received)
+            print(f"[GUI] Frame callback set on video client")
+
+            # Start passive receiving so we can view others even if we don't stream
+            try:
+                self.video_client.start_receiving()
+            except Exception as e:
+                print(f"[GUI] Failed to start passive video receiver: {e}")
+
+            # Also start a compatibility UDP receiver on the fixed broadcast port (10001)
+            # as a fallback path to ensure frames are displayed even if ephemeral port path fails.
+            try:
+                if not self.video_receiver_thread:
+                    self.video_receiver_thread = VideoReceiverThread(self.server_host, 10001)
+                    self.video_receiver_thread.frame_received.connect(lambda uid, frame: self._on_frame_received(uid, frame))
+                    self.video_receiver_thread.start()
+                    print("[GUI] Started fallback VideoReceiverThread on port 10001")
+            except Exception as e:
+                print(f"[GUI] Failed to start fallback VideoReceiverThread: {e}")
+            
             self.file_client = FileClient()
             self.chat_client = ChatClient(writer)
             self.screen_presenter = ScreenPresenter(writer)
             self.screen_viewer = ScreenViewer(writer)
             
             # Set UID for modules that need it
-            if self.uid:
-                self.screen_viewer.set_uid(self.uid)
-                print(f"[GUI] Screen viewer UID set to {self.uid}")
+            self.screen_viewer.set_uid(self.uid)
+            print(f"[GUI] Screen viewer UID set to {self.uid}")
             
             # Set hosts and writer for modules that need it
             self.file_client.set_host(self.server_host)
@@ -958,8 +1106,6 @@ class ClientMainWindow(QMainWindow):
             print("[GUI] Client modules initialized successfully")
             self.chat_widget.add_message("System", "✓ Client modules initialized", is_system=True)
             
-            # Video receiver is already started in setup_video_receiver()
-            # No need to start it again here
         except Exception as e:
             print(f"[GUI] Error initializing client modules: {e}")
             import traceback
@@ -1012,6 +1158,23 @@ class ClientMainWindow(QMainWindow):
                 uid = message.get('uid')
                 username = message.get('username')
                 self.chat_widget.add_message("System", f"{username} left", is_system=True)
+                
+                # Remove from participants
+                if uid in self.participants:
+                    self.participant_panel.remove_participant(uid)
+                    del self.participants[uid]
+                
+                # Remove video feed (only if it's not active)
+                if uid in self.video_grid.video_frames:
+                    # Keep the video feed for a bit in case they reconnect
+                    # Only remove if they haven't sent a frame in the last 30 seconds
+                    if uid in self.video_grid.last_frame_time:
+                        time_since_last_frame = time.time() - self.video_grid.last_frame_time[uid]
+                        if time_since_last_frame > 30:
+                            self.video_grid.remove_video_feed(uid)
+                    else:
+                        # No recent frames, remove immediately
+                        self.video_grid.remove_video_feed(uid)
             
             elif msg_type == MessageTypes.CHAT:
                 self.handle_chat_message(message)
@@ -1040,6 +1203,14 @@ class ClientMainWindow(QMainWindow):
             elif msg_type == MessageTypes.UNICAST_SENT:
                 to_username = message.get('to_username', 'unknown')
                 self.chat_widget.add_message("System", f"Private message delivered to {to_username}", is_system=True)
+            
+            elif msg_type == MessageTypes.SCREEN_SHARE_PORTS:
+                if self.screen_presenter:
+                    import asyncio
+                    asyncio.run_coroutine_threadsafe(
+                        self.screen_presenter.handle_message(message),
+                        self.network_thread.loop
+                    )
             
             elif msg_type == MessageTypes.PRESENT_START_BROADCAST:
                 self.handle_present_start_broadcast(message)
@@ -1286,9 +1457,18 @@ class ClientMainWindow(QMainWindow):
         else:
             self.chat_widget.add_message("System", f"Download failed: {error}", is_system=True)
         
-        # Schedule the sender thread for deletion
+        # Wait for thread to finish before scheduling deletion
         if sender:
-            sender.deleteLater()
+            sender.quit()  # Signal the thread to exit
+            if not sender.wait(3000):  # Wait up to 3 seconds
+                print(f"[DOWNLOAD] Thread did not exit within timeout, forcing termination")
+                sender.terminate()
+                sender.wait(1000)  # Wait for termination to complete
+            sender.deleteLater()  # Schedule for deletion
+            
+            # Remove from active workers list
+            if sender in self.active_workers:
+                self.active_workers.remove(sender)
     
     def on_send_broadcast(self, text: str):
         """Send broadcast message."""
@@ -1327,6 +1507,33 @@ class ClientMainWindow(QMainWindow):
         # Show in chat that we're sending a private message
         target_username = self.get_username_by_uid(target_uid)
         self.chat_widget.add_message("You", f"(→ {target_username}) {text}")
+
+    def on_send_multicast(self, target_uids: object, text: str):
+        """Send a message to multiple selected recipients (multicast).
+        If target_uids is None, prompt the user to select multiple recipients, then
+        send individual unicast messages to each selected user.
+        """
+        if not self.network_thread or not self.network_thread.writer:
+            self.chat_widget.add_message("System", "Not connected to server", is_system=True)
+            return
+        
+        # Select recipients if not provided
+        if target_uids is None:
+            target_uids = self.select_multiple_recipients()
+            if not target_uids:
+                self.chat_widget.add_message("System", "No recipients selected", is_system=True)
+                return
+        
+        # Send as multiple unicasts for compatibility with existing server
+        for uid in target_uids:
+            message = {
+                'type': MessageTypes.UNICAST,
+                'target_uid': uid,
+                'text': text
+            }
+            self.network_thread.send_message(message)
+            target_username = self.get_username_by_uid(uid)
+            self.chat_widget.add_message("You", f"(→ {target_username}) {text}")
     
     def select_recipient(self) -> Optional[int]:
         """Show dialog to select message recipient."""
@@ -1356,6 +1563,47 @@ class ClientMainWindow(QMainWindow):
             return int(uid_str)
         
         return None
+
+    def select_multiple_recipients(self) -> Optional[List[int]]:
+        """Show dialog to select multiple recipients for multicast."""
+        # Build list of recipients (exclude self)
+        choices = []
+        uid_map = []
+        for uid, participant in self.participants.items():
+            if uid != self.uid:
+                username = participant.get('username', f'User {uid}')
+                choices.append(f"{uid} - {username}")
+                uid_map.append(uid)
+        
+        if not choices:
+            QMessageBox.warning(self, "No Recipients", "No other participants available")
+            return None
+        
+        # Use a simple multi-select dialog using QInputDialog in a loop-like fashion
+        # For better UX we'd build a custom QDialog with a QListWidget in multi-selection mode.
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Select Recipients")
+        from PyQt6.QtWidgets import QVBoxLayout, QListWidget, QPushButton
+        layout = QVBoxLayout(dialog)
+        list_widget = QListWidget(dialog)
+        list_widget.addItems(choices)
+        list_widget.setSelectionMode(QListWidget.SelectionMode.MultiSelection)
+        layout.addWidget(list_widget)
+        ok_btn = QPushButton("OK", dialog)
+        ok_btn.clicked.connect(dialog.accept)
+        layout.addWidget(ok_btn)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return None
+        
+        selected = list_widget.selectedIndexes()
+        if not selected:
+            return None
+        
+        selected_uids = []
+        for index in selected:
+            if 0 <= index.row() < len(uid_map):
+                selected_uids.append(uid_map[index.row()])
+        return selected_uids
     
     def get_username_by_uid(self, uid: int) -> str:
         """Get username by UID."""
@@ -1387,6 +1635,8 @@ class ClientMainWindow(QMainWindow):
                 port,
                 save_path
             )
+            # Track worker for cleanup
+            self.active_workers.append(worker)
             # Connect with sender so we can clean it up
             worker.task_done.connect(lambda success, error, result: self._on_download_complete(success, error, result, filename, worker))
             worker.start()
@@ -1474,7 +1724,25 @@ class ClientMainWindow(QMainWindow):
                 # Stop local video capture timer
                 if hasattr(self, 'local_video_timer'):
                     self.local_video_timer.stop()
+                    self.local_video_timer.deleteLater()
+                    self.local_video_timer = None
+                # Clear any queued local frames so the tile resets immediately
+                try:
+                    with self.frame_lock:
+                        if hasattr(self, 'pending_frames') and self.uid in self.pending_frames:
+                            del self.pending_frames[self.uid]
+                        # Stop the GUI update timer if nothing to process
+                        if hasattr(self, 'video_update_timer') and not self.pending_frames:
+                            self.video_update_timer.stop()
+                except Exception:
+                    pass
+                # Reset our own tile back to placeholder state
+                if self.uid is not None:
+                    self.video_grid.reset_feed(self.uid)
             except Exception as e:
+                print(f"[GUI] Error stopping video: {e}")
+                import traceback
+                traceback.print_exc()
                 self.chat_widget.add_message("System", f"Failed to stop video: {e}", is_system=True)
         else:
             # Start video
@@ -1485,6 +1753,9 @@ class ClientMainWindow(QMainWindow):
                 # Start local video capture for GUI display
                 self._start_local_video_display()
             except Exception as e:
+                print(f"[GUI] Error starting video: {e}")
+                import traceback
+                traceback.print_exc()
                 self.chat_widget.add_message("System", f"Failed to start video: {e}", is_system=True)
     
     def on_toggle_screen_share(self):
@@ -1671,19 +1942,24 @@ class ClientMainWindow(QMainWindow):
     
     def _start_local_video_display(self):
         """Start displaying local webcam feed in GUI."""
-        if not HAS_OPENCV or not self.video_client or not self.video_client.cap:
+        if not HAS_OPENCV or not self.video_client:
             return
         
         # Create timer to capture and display local video
         self.local_video_timer = QTimer()
         self.local_video_timer.timeout.connect(self._update_local_video)
-        self.local_video_timer.start(33)  # ~30 FPS
+        self.local_video_timer.start(100)  # ~10 FPS for local display (to reduce CPU load)
         print("[GUI] Started local video display timer")
     
     def _update_local_video(self):
         """Update local video feed in GUI."""
         try:
             if not self.video_client or not self.video_client.cap or not self.video_client.is_streaming:
+                # Stop timer if video client is not available
+                if hasattr(self, 'local_video_timer'):
+                    self.local_video_timer.stop()
+                    self.local_video_timer.deleteLater()
+                    self.local_video_timer = None
                 return
             
             # Capture frame from webcam
@@ -1694,12 +1970,20 @@ class ClientMainWindow(QMainWindow):
             # Resize to match video client settings
             frame = cv2.resize(frame, (self.video_client.width, self.video_client.height))
             
-            # Display in GUI (use own UID)
+            # Display in GUI (use own UID) - add to pending frames
             if self.uid:
-                self._on_frame_received(self.uid, frame)
+                # Use thread-safe method to add frame
+                with self.frame_lock:
+                    self.pending_frames[self.uid] = frame
+                
+                # Ensure timer is running
+                if not self.video_update_timer.isActive():
+                    self.video_update_timer.start(16)
         
         except Exception as e:
             print(f"[GUI] Error updating local video: {e}")
+            import traceback
+            traceback.print_exc()
     
     # ========================================================================
     # CLEANUP
@@ -1711,14 +1995,33 @@ class ClientMainWindow(QMainWindow):
         if hasattr(self, 'heartbeat_timer'):
             self.heartbeat_timer.stop()
         
+        # Stop video update timer
+        if hasattr(self, 'video_update_timer'):
+            self.video_update_timer.stop()
+        
+        # Clean up all active workers
+        for worker in self.active_workers[:]:  # Copy list to avoid modification during iteration
+            worker.quit()
+            if not worker.wait(2000):  # Wait up to 2 seconds
+                print(f"[CLEANUP] Worker did not exit, forcing termination")
+                worker.terminate()
+                worker.wait(1000)
+            worker.deleteLater()
+        
         # Stop video receiver
         self.stop_video_receiver()
         
         # Clean up audio/video clients
         if self.audio_client:
-            self.audio_client.cleanup()
+            try:
+                self.audio_client.cleanup()
+            except Exception as e:
+                print(f"[CLEANUP] Error cleaning up audio client: {e}")
         if self.video_client:
-            self.video_client.cleanup()
+            try:
+                self.video_client.cleanup()
+            except Exception as e:
+                print(f"[CLEANUP] Error cleaning up video client: {e}")
         
         # Stop network thread
         if self.network_thread:
@@ -1846,7 +2149,20 @@ class AsyncTaskWorker(QThread):
         except Exception as e:
             self.task_done.emit(False, str(e), None)
         finally:
-            loop.close()
+            # Clean up all tasks before closing the loop
+            try:
+                # Cancel all remaining tasks
+                pending = asyncio.all_tasks(loop)
+                for task in pending:
+                    task.cancel()
+                
+                # Wait for all tasks to be cancelled
+                if pending:
+                    loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+            except Exception as e:
+                print(f"[WORKER] Error cleaning up tasks: {e}")
+            finally:
+                loop.close()
 
 
 # ============================================================================

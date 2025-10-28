@@ -50,6 +50,7 @@ class VideoClient:
         
         # State
         self.is_streaming = False
+        self.is_receiving = False
         self.frame_id = 0
         self.sequence_number = 0
         self.socket = None
@@ -68,6 +69,11 @@ class VideoClient:
         # Timing
         self.frame_interval = 1.0 / self.target_fps
         self.last_frame_time = 0
+        
+        # Registration magic for receiver-only registration
+        self.REGISTER_MAGIC = b'VGPR'
+        self._registration_thread = None
+        self._registration_running = False
     
     def start_streaming(self):
         """Start video streaming from webcam."""
@@ -87,16 +93,8 @@ class VideoClient:
             # Create UDP socket for sending chunks
             self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
-            # Create separate UDP socket for receiving frames (bind to ephemeral port)
-            self.receive_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            self.receive_socket.bind(('', 0))  # Bind to ephemeral port
-            self.receive_port = self.receive_socket.getsockname()[1]  # Get the assigned port
-            self.receive_socket.settimeout(1.0)
-            print(f"[VIDEO] Receive socket bound to port {self.receive_port}")
-
-            # Start frame receiver thread
-            self.receiver_thread = threading.Thread(target=self._receive_frames, daemon=True)
-            self.receiver_thread.start()
+            # Ensure receive loop is running and registered
+            self.start_receiving()
 
             # Start streaming
             self.is_streaming = True
@@ -111,7 +109,9 @@ class VideoClient:
             print(f"[VIDEO] Resolution: {self.width}x{self.height}")
             print(f"[VIDEO] Target FPS: {self.target_fps}")
             print(f"[VIDEO] Sending to {self.server_ip}:{self.server_port}")
-            print(f"[VIDEO] Receiving on port 10001")
+            print(f"[VIDEO] Receiving on port {self.receive_port}")
+            print(f"[VIDEO] UID: {self.uid}")
+            print(f"[VIDEO] Frame callback set: {self.frame_received_callback is not None}")
 
         except cv2.error as e:
             print(f"[VIDEO] OpenCV error: {e}")
@@ -167,7 +167,9 @@ class VideoClient:
                 self._send_frame(frame_bytes)
                 
                 self.last_frame_time = time.time()
-                print(f"[VIDEO] Captured and sent frame {self.frame_id}, size: {len(frame_bytes)} bytes")
+                # Only print every 30 frames to reduce spam (about every 2 seconds at 15fps)
+                if self.frame_id % 30 == 0:
+                    print(f"[VIDEO] Sent frame {self.frame_id}, size: {len(frame_bytes)} bytes")
                 
             except Exception as e:
                 print(f"[VIDEO] Error in capture loop: {e}")
@@ -183,8 +185,6 @@ class VideoClient:
         # Calculate number of chunks needed
         max_chunk_payload = self.MTU_SIZE - self.CHUNK_HEADER_SIZE
         num_chunks = (frame_size + max_chunk_payload - 1) // max_chunk_payload  # Ceiling division
-        
-        print(f"[VIDEO] Sending frame {self.frame_id} in {num_chunks} chunks")
         
         # Send chunks
         for chunk_idx in range(num_chunks):
@@ -214,7 +214,6 @@ class VideoClient:
             try:
                 self.socket.sendto(packet, (self.server_ip, self.server_port))
                 self.sequence_number = (self.sequence_number + 1) % 0xFFFFFFFF
-                print(f"[VIDEO] Sent chunk {chunk_idx + 1}/{num_chunks} of frame {self.frame_id}, size: {len(packet)} bytes")
             except OSError as e:
                 print(f"[VIDEO] Network error sending chunk to {self.server_ip}:{self.server_port}: {e}")
                 print(f"[VIDEO] Ensure server is running and firewall permits UDP on port {self.server_port}")
@@ -226,29 +225,119 @@ class VideoClient:
     
     def _receive_frames(self):
         """Receive frames on the receive socket (runs in separate thread)."""
-        while self.is_streaming:
+        print(f"[VIDEO] Receive thread started, listening on port {self.receive_port}")
+        frame_count = 0
+        first_packet_logged = False
+        while self.is_receiving:
             try:
                 data, addr = self.receive_socket.recvfrom(65536)
+                if not first_packet_logged:
+                    print(f"[VIDEO] Receive socket got first packet: size={len(data)} from {addr}")
+                    first_packet_logged = True
+                
                 # Parse broadcast header
                 if len(data) >= 12:
                     uid, timestamp = struct.unpack('>I Q', data[:12])
                     frame_data = data[12:]
+                    
                     # Decode and call callback
                     try:
                         import numpy as np
                         import cv2
                         nparr = np.frombuffer(frame_data, np.uint8)
                         frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-                        if frame is not None and self.frame_received_callback:
-                            self.frame_received_callback(uid, frame)
-                            print(f"[VIDEO] Received and decoded frame from uid={uid}, size={len(frame_data)} bytes")
+                        if frame is not None:
+                            # Call callback safely (it will handle thread safety)
+                            if self.frame_received_callback:
+                                try:
+                                    self.frame_received_callback(uid, frame)
+                                except Exception as callback_error:
+                                    print(f"[VIDEO] Error in callback: {callback_error}")
+                                    import traceback
+                                    traceback.print_exc()
+                            else:
+                                # Only print this once to avoid spam
+                                if frame_count == 0:
+                                    print(f"[VIDEO] ERROR: frame_received_callback is None!")
+                            
+                            frame_count += 1
+                            # Print first frame and every 30th frame
+                            if frame_count == 1 or frame_count % 30 == 0:
+                                print(f"[VIDEO] Received frame #{frame_count} from uid={uid}, frame shape={frame.shape}, callback={self.frame_received_callback is not None}")
+                        else:
+                            print(f"[VIDEO] ERROR: Failed to decode frame from uid={uid}")
                     except Exception as e:
                         print(f"[VIDEO] Error decoding received frame: {e}")
+                        import traceback
+                        traceback.print_exc()
+                else:
+                    # Don't print this for every packet to reduce spam
+                    pass
+                    
             except socket.timeout:
                 continue
             except Exception as e:
-                if self.is_streaming:
+                if self.is_receiving:
                     print(f"[VIDEO] Error receiving frame: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    
+                    # Small delay to prevent busy-waiting on errors
+                    time.sleep(0.1)
+
+    def _register_receive_port(self):
+        """Send a small UDP packet to inform server of our receive port for viewing."""
+        try:
+            if not hasattr(self, 'receive_port') or self.receive_port is None:
+                return
+            # Registration packet: magic + uid + receive_port (big-endian)
+            uid = self.uid if self.uid is not None else 0
+            payload = struct.pack('>4s I I', self.REGISTER_MAGIC, uid, int(self.receive_port))
+            # Send to the same server/port as video chunks
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+                s.sendto(payload, (self.server_ip, self.server_port))
+            print(f"[VIDEO] Registered receive port {self.receive_port} for uid={uid} with server {self.server_ip}:{self.server_port}")
+        except Exception as e:
+            print(f"[VIDEO] Failed to register receive port: {e}")
+    
+    def _registration_loop(self):
+        """Periodically (every 2s) re-register our port while receiving."""
+        while self._registration_running:
+            try:
+                self._register_receive_port()
+            except Exception:
+                pass
+            time.sleep(2.0)
+
+    def start_receiving(self):
+        """Start receiving broadcast frames on a UDP port and register with the server."""
+        try:
+            if self.is_receiving and getattr(self, 'receive_socket', None):
+                return
+            # Create or re-bind receive socket
+            if getattr(self, 'receive_socket', None):
+                try:
+                    self.receive_socket.close()
+                except Exception:
+                    pass
+            self.receive_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self.receive_socket.bind(('', 0))
+            self.receive_port = self.receive_socket.getsockname()[1]
+            self.receive_socket.settimeout(1.0)
+            print(f"[VIDEO] Receive socket bound to port {self.receive_port}")
+            # Start receive thread
+            self.is_receiving = True
+            self.receiver_thread = threading.Thread(target=self._receive_frames, daemon=True)
+            self.receiver_thread.start()
+            # Register port with server
+            self._register_receive_port()
+            # Start periodic re-registration thread
+            if not self._registration_running:
+                self._registration_running = True
+                self._registration_thread = threading.Thread(target=self._registration_loop, daemon=True)
+                self._registration_thread.start()
+        except Exception as e:
+            print(f"[VIDEO] Error starting receive loop: {e}")
     
     def set_frame_received_callback(self, callback):
         """Set callback for when frames are received."""
@@ -260,6 +349,12 @@ class VideoClient:
             self.uid = 0  # Default placeholder UID
         else:
             self.uid = uid
+        # If already receiving, re-register with new uid
+        try:
+            if getattr(self, 'receive_socket', None) is not None:
+                self._register_receive_port()
+        except Exception:
+            pass
     
     def stop_streaming(self):
         """Stop video streaming."""
@@ -267,6 +362,7 @@ class VideoClient:
             return
 
         self.is_streaming = False
+        # If we were only receiving, leave receive running unless explicitly stopped
 
         # Wait for capture thread to finish
         if self.capture_thread and self.capture_thread.is_alive():
@@ -282,9 +378,7 @@ class VideoClient:
             self.socket.close()
             self.socket = None
 
-        if self.receive_socket:
-            self.receive_socket.close()
-            self.receive_socket = None
+        # Keep receiving so the user can still view others' videos
 
         print("[VIDEO] Stopped streaming")
     
@@ -292,6 +386,31 @@ class VideoClient:
         """Clean up resources."""
         self.stop_streaming()
 
+    def stop_receiving(self):
+        """Stop receiving broadcast frames."""
+        try:
+            self.is_receiving = False
+            # Stop registration thread
+            if self._registration_running:
+                self._registration_running = False
+                if self._registration_thread and self._registration_thread.is_alive():
+                    self._registration_thread.join(timeout=1.0)
+                self._registration_thread = None
+            if getattr(self, 'receiver_thread', None) and self.receiver_thread.is_alive():
+                # Unblock socket by closing
+                if getattr(self, 'receive_socket', None):
+                    try:
+                        self.receive_socket.close()
+                    except Exception:
+                        pass
+                self.receiver_thread.join(timeout=1.0)
+        finally:
+            if getattr(self, 'receive_socket', None):
+                try:
+                    self.receive_socket.close()
+                except Exception:
+                    pass
+                self.receive_socket = None
 
 def run_client(server_ip: str, uid: int, fps: int = 15, resolution: Tuple[int, int] = (640, 360)):
     """Run the video client."""
