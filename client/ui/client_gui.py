@@ -53,6 +53,12 @@ except ImportError:
     HAS_SOUNDDEVICE = False
 
 try:
+    import pyaudio
+    HAS_PYAUDIO = True
+except ImportError:
+    HAS_PYAUDIO = False
+
+try:
     from opuslib import Encoder, Decoder
     HAS_OPUS = True
 except (ImportError, Exception) as e:
