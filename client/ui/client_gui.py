@@ -936,8 +936,23 @@ class ClientMainWindow(QMainWindow):
         """Connect to the server."""
         from PyQt6.QtWidgets import QInputDialog
         
-        # Always show dialog to enter username
-        # If username was provided via CLI, use it as default
+        # Prompt for server IP
+        default_host = getattr(self, 'server_host', 'localhost') or 'localhost'
+        host_text, ok = QInputDialog.getText(self, 'Server Address', 'Enter server IP/hostname:', text=default_host)
+        if not ok or not host_text:
+            QMessageBox.warning(self, "Error", "Server IP/hostname required")
+            return False
+        self.server_host = host_text.strip()
+
+        # Prompt for server port
+        default_port_str = str(getattr(self, 'server_port', 9000) or 9000)
+        port_text, ok = QInputDialog.getText(self, 'Server Port', 'Enter server port:', text=default_port_str)
+        if not ok or not port_text.strip().isdigit():
+            QMessageBox.warning(self, "Error", "Valid server port required")
+            return False
+        self.server_port = int(port_text.strip())
+
+        # Always show dialog to enter username (use existing as default if present)
         default_username = getattr(self, 'username', '') or ''
         text, ok = QInputDialog.getText(self, 'Login', 'Enter your username:', text=default_username)
         
@@ -2197,18 +2212,28 @@ class NetworkThread(QThread):
     async def _connect_and_listen(self):
         """Connect to server and listen for messages."""
         try:
-            self.reader, self.writer = await asyncio.open_connection(self.host, self.port)
+            print(f"[NETWORK] Attempting to connect to {self.host}:{self.port}...")
+            
+            # Add connection timeout
+            self.reader, self.writer = await asyncio.wait_for(
+                asyncio.open_connection(self.host, self.port),
+                timeout=10.0
+            )
+            
+            print(f"[NETWORK] Successfully connected to {self.host}:{self.port}")
             self.connected.emit()
             self.running = True
             
             # Send login
             login_msg = create_login_message(self.username)
             await self.send_message_async(login_msg)
+            print(f"[NETWORK] Login message sent for user: {self.username}")
             
             # Listen for messages
             while self.running:
                 data = await self.reader.readline()
                 if not data:
+                    print("[NETWORK] Received empty data, connection closed by server")
                     break
                 
                 try:
@@ -2217,10 +2242,25 @@ class NetworkThread(QThread):
                 except json.JSONDecodeError:
                     pass
         
+        except asyncio.TimeoutError:
+            print(f"[NETWORK] Connection timeout: Could not connect to {self.host}:{self.port} within 10 seconds")
+            print(f"[NETWORK] Make sure:")
+            print(f"  1. Server is running on {self.host}:{self.port}")
+            print(f"  2. Server IP address is correct (not 'localhost' if connecting from another computer)")
+            print(f"  3. Firewall allows connections on port {self.port}")
+        except ConnectionRefusedError:
+            print(f"[NETWORK] Connection refused: Server at {self.host}:{self.port} is not accepting connections")
+            print(f"[NETWORK] Make sure the server is running and listening on the correct IP/port")
+        except OSError as e:
+            print(f"[NETWORK] Network error: {e}")
+            print(f"[NETWORK] Check that you can reach {self.host}:{self.port}")
         except Exception as e:
-            print(f"[NETWORK] Error: {e}")
+            print(f"[NETWORK] Unexpected error: {e}")
+            import traceback
+            traceback.print_exc()
         finally:
             self.disconnected.emit()
+            print("[NETWORK] Disconnected from server")
             if self.writer:
                 self.writer.close()
                 await self.writer.wait_closed()
