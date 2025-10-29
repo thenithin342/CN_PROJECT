@@ -61,6 +61,9 @@ class AudioClient:
         # Participant mute list
         self.muted_participants = set()
         
+        # Pre-emphasis filter state for capture processing
+        self._pre_emphasis_prev = 0.0
+        
         # Check dependencies
         if not HAS_PYAUDIO:
             raise ImportError("pyaudio is required for audio capture")
@@ -106,15 +109,27 @@ class AudioClient:
                     
                     # Convert to float32 normalized
                     audio_float = audio_data.astype(np.float32) / 32768.0
+
+                    # Optional light pre-emphasis to enhance speech clarity (vectorized)
+                    if audio_float.size > 1:
+                        alpha = 0.97
+                        emphasized = np.copy(audio_float)
+                        emphasized[1:] = audio_float[1:] - alpha * audio_float[:-1]
+                        emphasized[0] = audio_float[0] - alpha * self._pre_emphasis_prev
+                        self._pre_emphasis_prev = float(audio_float[-1])
+                        # Use emphasized signal for transmission
+                        audio_float = emphasized
                     
                     # Log audio levels for debugging
                     rms_level = np.sqrt(np.mean(audio_float**2))
                     if rms_level > 0.01:
                         print(f"[AUDIO] Input RMS: {rms_level:.4f}")
                     
-                    # Send audio data
+                    # Send audio data (convert back to int16 bytes)
+                    audio_out = np.clip(audio_float, -1.0, 1.0)
+                    audio_int16_out = (audio_out * 32768.0).astype(np.int16)
                     header = self._create_packet_header()
-                    packet = header + data
+                    packet = header + audio_int16_out.tobytes()
                     
                     try:
                         self.socket.sendto(packet, (self.server_ip, self.server_port))
