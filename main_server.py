@@ -79,7 +79,9 @@ if __name__ == "__main__":
         if server and hasattr(server, 'video_server') and server.video_server:
             server.video_server.stop()
     except Exception as e:
-        logger.log_error("server", e)
+        import traceback
+        logger.error(f"Server failed to start: {e}")
+        traceback.print_exc()
         if server and hasattr(server, 'audio_server') and server.audio_server:
             server.audio_server.stop()
         if server and hasattr(server, 'video_server') and server.video_server:

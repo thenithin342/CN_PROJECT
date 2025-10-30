@@ -46,12 +46,16 @@ class CollaborationServer:
     def __init__(self, host: str = '0.0.0.0', port: int = 9000, upload_dir: str = 'uploads', 
                  audio_port: int = 11000, video_port: int = 10000):
         self.config = ServerConfig(host, port, upload_dir)
+        logger.info('[TRACE] ServerConfig initialized')
         self.clients: Dict[int, asyncio.StreamWriter] = {}  # uid -> writer
         
         # Initialize modules
         self.chat_server = ChatServer()
+        logger.info('[TRACE] ChatServer initialized')
         self.file_server = FileServer(upload_dir, self.chat_server.participants, self.broadcast)
+        logger.info('[TRACE] FileServer initialized')
         self.screen_server = ScreenServer(self.chat_server.participants)
+        logger.info('[TRACE] ScreenServer initialized')
         
         # Initialize audio server if available
         self.audio_server = None
@@ -59,25 +63,26 @@ class CollaborationServer:
         if HAS_AUDIO and AudioServer:
             try:
                 self.audio_server = AudioServer(host, audio_port)
-                logger.info("Audio server initialized")
+                logger.info('Audio server initialized')
             except Exception as e:
                 logger.warning(f"Could not initialize audio server: {e}")
                 self.audio_server = None
         else:
             logger.info("Audio server not available (opuslib not installed)")
-        
+        logger.info('[TRACE] AudioServer check completed')
         # Initialize video server if available
         self.video_server = None
         self.video_task = None
         if HAS_VIDEO and VideoServer:
             try:
                 self.video_server = VideoServer(host, video_port)
-                logger.info("Video server initialized")
+                logger.info('Video server initialized')
             except Exception as e:
                 logger.warning(f"Could not initialize video server: {e}")
                 self.video_server = None
         else:
-            logger.info("Video server not available (opencv-python not installed)")
+            logger.info('Video server not available (opencv-python not installed)')
+        logger.info('[TRACE] VideoServer check completed')
     
     async def broadcast(self, message: dict, exclude_uid: int = None):
         """Send a JSON message to all connected clients."""
@@ -198,9 +203,12 @@ class CollaborationServer:
         # Start audio server in background if available
         if self.audio_server:
             try:
-                self.audio_task = asyncio.create_task(self.audio_server.start())
-                self.audio_task.add_done_callback(done_callback("Audio server"))
-                logger.info("Audio server started")
+                loop = asyncio.get_running_loop()
+                self.audio_task = loop.run_in_executor(
+                    None,
+                    self.audio_server.start
+                )
+                logger.info("Audio server started (in background thread)")
             except Exception as e:
                 logger.warning(f"Could not start audio server: {e}")
         
@@ -214,17 +222,20 @@ class CollaborationServer:
                 logger.warning(f"Could not start video server: {e}")
         
         # Start main TCP server
+        logger.info("[DEBUG] About to start TCP server...")
         server = await asyncio.start_server(
             self.handle_client,
             self.config.host,
             self.config.port
         )
+        logger.info("[DEBUG] TCP server created, about to enter serve_forever...")
         
         addr = ', '.join(str(sock.getsockname()) for sock in server.sockets)
         logger.info(f"Server listening on {addr}")
         
         async with server:
             await server.serve_forever()
+        logger.info("[DEBUG] serve_forever exited (should not occur in normal operation)")
 
 
 import argparse
