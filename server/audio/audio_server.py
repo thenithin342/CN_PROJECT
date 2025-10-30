@@ -11,6 +11,7 @@ import threading
 import time
 import argparse
 import socket
+import errno
 from typing import Dict, Tuple, Optional
 from collections import deque
 import numpy as np
@@ -86,11 +87,39 @@ class AudioServer:
                 with self.client_lock:
                     clients = list(self.clients.keys())
                 
+                if len(clients) == 1:
+                    # Only one client: loop back their own audio.
+                    uid = clients[0]
+                    with self.audio_lock:
+                        if uid in self.client_audio:
+                            audio = self.client_audio[uid]
+                        else:
+                            audio = np.zeros(self.CHUNK_SIZE, dtype=np.float32)
+                    client_info = self.clients[uid]
+                    if not client_info.muted:
+                        # Apply a small gain and clip to avoid being too quiet
+                        loopback_gain = 2.0
+                        audio_boosted = np.clip(audio * loopback_gain, -1.0, 1.0)
+                        audio_int16 = (audio_boosted * 32768.0).astype(np.int16)
+                        audio_bytes = audio_int16.tobytes()
+                        # Create packet
+                        timestamp = int(time.time() * 1000)
+                        # Tag uid as the speaker (the same uid in loopback)
+                        header = struct.pack('>I Q I', 0, timestamp, uid)
+                        packet = header + audio_bytes
+                        print(f"[AUDIO SERVER] Loopback to uid={uid}: min={audio_int16.min()} max={audio_int16.max()} mean={audio_int16.mean()}")
+                        try:
+                            self.socket.sendto(packet, client_info.address)
+                        except Exception as e:
+                            print(f"[AUDIO SERVER] Error sending loopback audio to uid={uid}: {e}")
+                    time.sleep(0.01)
+                    continue
+
                 if len(clients) <= 1:
                     # Not enough clients to mix
                     time.sleep(0.01)
                     continue
-                
+
                 # Mix audio for all clients
                 for uid in clients:
                     # Get all other clients' audio
@@ -101,6 +130,7 @@ class AudioServer:
                     
                     # Mix audio
                     mixed_audio = None
+                    contributors = []
                     for other_uid in other_clients:
                         with self.audio_lock:
                             if other_uid in self.client_audio:
@@ -111,31 +141,44 @@ class AudioServer:
                                 else:
                                     # Add audio with saturation
                                     mixed_audio = np.clip(mixed_audio + other_audio, -1.0, 1.0)
-                    
+                                contributors.append(other_uid)
                     # Send mixed audio to this client
                     if mixed_audio is not None:
                         try:
                             with self.client_lock:
                                 if uid in self.clients:
                                     client_info = self.clients[uid]
-                                    
+
                             if not client_info.muted:
-                                # Convert to int16
-                                audio_int16 = (mixed_audio * 32768.0).astype(np.int16)
+                                # Apply a small gain and clip to avoid being too quiet
+                                mix_gain = 2.0
+                                mixed_audio_boosted = np.clip(mixed_audio * mix_gain, -1.0, 1.0)
+                                audio_int16 = (mixed_audio_boosted * 32768.0).astype(np.int16)
                                 audio_bytes = audio_int16.tobytes()
-                                
                                 # Create packet
                                 timestamp = int(time.time() * 1000)
-                                header = struct.pack('>I Q I', 0, timestamp, 0)
+                                # If exactly one contributor, tag uid as that speaker, else 0 means mixed
+                                origin_uid = contributors[0] if len(contributors) == 1 else 0
+                                header = struct.pack('>I Q I', 0, timestamp, origin_uid)
                                 packet = header + audio_bytes
-                                
-                                # Send to client
-                                self.socket.sendto(packet, client_info.address)
+                                print(f"[AUDIO SERVER] To uid={uid}: min={audio_int16.min()} max={audio_int16.max()} mean={audio_int16.mean()}")
+                                try:
+                                    self.socket.sendto(packet, client_info.address)
+                                except OSError as e:
+                                    if e.errno == errno.WSAECONNRESET or e.errno == errno.ECONNRESET:
+                                        # Connection reset by peer, remove client
+                                        with self.client_lock:
+                                            if uid in self.clients:
+                                                print(f"[AUDIO SERVER] Client {uid} disconnected (connection reset)")
+                                                del self.clients[uid]
+                                        with self.audio_lock:
+                                            if uid in self.client_audio:
+                                                del self.client_audio[uid]
+                                    else:
+                                        print(f"[AUDIO SERVER] Error sending to client {uid}: {e}")
                         except Exception as e:
                             print(f"[AUDIO SERVER] Error sending to client {uid}: {e}")
-                
                 time.sleep(0.01)
-            
             except Exception as e:
                 print(f"[AUDIO SERVER] Error in mixing loop: {e}")
     
@@ -171,9 +214,9 @@ class AudioServer:
         header_info = self._parse_packet_header(data)
         if header_info is None:
             return
-        
+    
         sequence, timestamp, uid, payload = header_info
-        
+    
         # Update client info
         with self.client_lock:
             if uid not in self.clients:
@@ -181,15 +224,14 @@ class AudioServer:
                 print(f"[AUDIO SERVER] New client: uid={uid}")
             else:
                 self.clients[uid].address = addr
-            
             client_info = self.clients[uid]
             client_info.last_packet_time = time.time()
             client_info.received_packets += 1
-        
+    
         # Store audio data
         audio_int16 = np.frombuffer(payload, dtype=np.int16)
         audio_float = audio_int16.astype(np.float32) / 32768.0
-        
+        print(f"[AUDIO SERVER] Received from uid={uid}: min={audio_int16.min()} max={audio_int16.max()} mean={audio_int16.mean()}")
         with self.audio_lock:
             self.client_audio[uid] = audio_float
     
@@ -221,6 +263,16 @@ class AudioServer:
                 self._handle_packet(data, addr)
             except socket.timeout:
                 continue
+            except OSError as e:
+                if e.errno == errno.WSAECONNRESET or e.errno == errno.ECONNRESET:
+                    # Connection reset by peer, ignore
+                    continue
+                elif e.errno == errno.WSAENOTSOCK or e.errno == errno.ENOTSOCK:
+                    # Socket closed, ignore
+                    continue
+                else:
+                    if self.running:
+                        print(f"[AUDIO SERVER] Error receiving packet: {e}")
             except Exception as e:
                 if self.running:
                     print(f"[AUDIO SERVER] Error receiving packet: {e}")

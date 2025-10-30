@@ -98,8 +98,10 @@ class AudioClient:
         try:
             while self.is_recording:
                 try:
-                    # Read audio data (non-blocking)
                     data = self.input_stream.read(self.CHUNK_SIZE, exception_on_overflow=False)
+                    if self.is_recording and data:
+                        audio_int16 = np.frombuffer(data, dtype=np.int16)
+                        print(f"[AUDIO][CAPTURE] min={audio_int16.min()} max={audio_int16.max()} mean={audio_int16.mean()}")
                     
                     if not self.is_recording:
                         break
@@ -154,32 +156,35 @@ class AudioClient:
         try:
             while self.is_recording:
                 try:
+                    # Warm-up: ensure some frames are buffered before playback to avoid underruns
+                    with self.jitter_buffer_lock:
+                        if len(self.jitter_buffer) < max(self.jitter_buffer_size, 5):
+                            # brief sleep and continue until buffer fills
+                            pass
+                    if len(self.jitter_buffer) < max(self.jitter_buffer_size, 5):
+                        time.sleep(0.01)
+                        continue
                     # Get audio from jitter buffer
                     audio_frame = None
                     with self.jitter_buffer_lock:
                         if len(self.jitter_buffer) > 0:
                             audio_frame = self.jitter_buffer.pop(0)
-                    
                     if audio_frame is not None:
                         # Ensure proper size
                         if len(audio_frame) >= self.CHUNK_SIZE:
                             audio_frame = audio_frame[:self.CHUNK_SIZE]
-                        
                         # Convert float32 back to int16
                         audio_int16 = (audio_frame * 32768.0).astype(np.int16)
-                        
-                        # Play audio
+                        print(f"[AUDIO][PLAYBACK] min={audio_int16.min()} max={audio_int16.max()} mean={audio_int16.mean()}")
                         self.output_stream.write(audio_int16.tobytes())
                     else:
-                        # No data, output silence
+                        print("[AUDIO][PLAYBACK] Buffer underrun—outputting silence")
                         silence = np.zeros(self.CHUNK_SIZE, dtype=np.int16)
                         self.output_stream.write(silence.tobytes())
-                
                 except Exception as e:
                     if self.is_recording:
                         print(f"[AUDIO] Error in playback loop: {e}")
                     break
-        
         except Exception as e:
             print(f"[AUDIO] Error in audio playback thread: {e}")
             import traceback
@@ -234,11 +239,11 @@ class AudioClient:
             # Initialize PyAudio
             self.p = pyaudio.PyAudio()
             
-            # Create UDP sockets
+            # Create a single UDP socket for send/receive so server replies reach us
             self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            self.receive_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            self.receive_socket.bind(('', 0))
-            recv_port = self.receive_socket.getsockname()[1]
+            self.socket.bind(('', 0))
+            self.receive_socket = self.socket
+            recv_port = self.socket.getsockname()[1]
             
             # Open input stream
             self.input_stream = self.p.open(
@@ -329,7 +334,8 @@ class AudioClient:
             finally:
                 self.socket = None
         
-        if self.receive_socket:
+        # If receive_socket is the same as socket, it is already closed above
+        if self.receive_socket and self.receive_socket is not self.socket:
             try:
                 self.receive_socket.close()
             except Exception as e:

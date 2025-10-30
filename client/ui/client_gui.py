@@ -46,25 +46,11 @@ except ImportError:
 
 # Audio imports
 try:
-    import sounddevice as sd
-    import numpy as np
-    HAS_SOUNDDEVICE = True
-except ImportError:
-    HAS_SOUNDDEVICE = False
-
-try:
     import pyaudio
     HAS_PYAUDIO = True
 except ImportError:
     HAS_PYAUDIO = False
-
-try:
-    from opuslib import Encoder, Decoder
-    HAS_OPUS = True
-except (ImportError, Exception) as e:
-    HAS_OPUS = False
-    print(f"[WARNING] Opus library not available: {e}")
-    print("Audio encoding will be disabled.")
+    print("[WARNING] pyaudio not available. Audio features disabled.")
 
 # Screen sharing imports
 try:
@@ -500,7 +486,8 @@ class ChatWidget(QWidget):
     message_sent = pyqtSignal(str)  # message text
     file_upload = pyqtSignal(str)  # file path
     broadcast_sent = pyqtSignal(str)  # message text
-    unicast_sent = pyqtSignal(int, str)  # target_uid, message text
+    # Use object for target_uid so we can emit None safely and prompt selection
+    unicast_sent = pyqtSignal(object, str)  # target_uid (int or None), message text
     multicast_sent = pyqtSignal(object, str)  # target_uids(list[int]) or None to select, message text
     file_download_requested = pyqtSignal(str, str)  # fid, filename
     
@@ -1082,8 +1069,8 @@ class ClientMainWindow(QMainWindow):
             # Initialize client modules
             print(f"[GUI] Initializing client modules for uid={self.uid}")
             
-            # Try to initialize audio client (only if opuslib is available)
-            if HAS_OPUS:
+            # Try to initialize audio client (only if pyaudio is available)
+            if HAS_PYAUDIO:
                 try:
                     self.audio_client = AudioClient(server_ip=self.server_host, server_port=11000, uid=self.uid)
                     print("[GUI] Audio client initialized")
@@ -1091,7 +1078,7 @@ class ClientMainWindow(QMainWindow):
                     print(f"[GUI] Failed to initialize audio client: {e}")
                     self.audio_client = None
             else:
-                print("[GUI] Audio client skipped (opuslib not available)")
+                print("[GUI] Audio client skipped (pyaudio not available)")
                 self.audio_client = None
             
             # Try to initialize video client (only if OpenCV is available)
@@ -1531,14 +1518,14 @@ class ClientMainWindow(QMainWindow):
         # Show in chat that we're broadcasting
         self.chat_widget.add_message("You", f"[BROADCAST] {text}")
     
-    def on_send_unicast(self, target_uid: int, text: str):
+    def on_send_unicast(self, target_uid: object, text: str):
         """Send private (unicast) message."""
         if not self.network_thread or not self.network_thread.writer:
             self.chat_widget.add_message("System", "Not connected to server", is_system=True)
             return
         
-        # If no target_uid provided, show dialog to select recipient
-        if target_uid is None:
+        # Normalize/collect target uid
+        if not isinstance(target_uid, int):
             target_uid = self.select_recipient()
             if target_uid is None:
                 self.chat_widget.add_message("System", "No recipient selected", is_system=True)
@@ -1700,13 +1687,16 @@ class ClientMainWindow(QMainWindow):
         """Handle incoming unicast (private) message."""
         from_uid = message.get('from_uid')
         from_username = message.get('from_username', 'unknown')
+        to_uid = message.get('to_uid')
         text = message.get('text', '')
         
-        # Display as private message
-        self.chat_widget.add_message(
-            f"[PRIVATE] {from_username}", 
-            text
-        )
+        # Only display if this message is for us (not from us)
+        if to_uid == self.uid and from_uid != self.uid:
+            # Display as private message
+            self.chat_widget.add_message(
+                f"[PRIVATE] {from_username}", 
+                text
+            )
     
     def on_participant_mute_clicked(self, uid: int):
         """Handle participant mute button click."""
