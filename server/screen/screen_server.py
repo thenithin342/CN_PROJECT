@@ -19,16 +19,9 @@ from server.utils.logger import logger
 
 class ScreenServer:
     """Server-side screen sharing functionality."""
-    
+
     def __init__(self, participants: dict = None):
-        self.presentation_active = False
-        self.presenter_uid = None
-        self.presenter_username = None
-        self.presenter_port = None  # Port for presenter to send frames
-        self.viewer_port = None  # Port for viewers to receive frames
-        self.presenter_writer = None  # Presenter connection
-        self.viewers: Dict[int, asyncio.StreamWriter] = {}  # uid -> viewer writer
-        self.frame_relay_task = None
+        self.presentations = {}  # uid -> presentation info
         self.next_ephemeral_port = 11001  # Changed from 10000 to avoid conflict with video server
         self.lock = asyncio.Lock()  # Protect shared state
         self.participants = participants or {}  # Reference to participants dict
@@ -43,172 +36,204 @@ class ScreenServer:
         """Start screen sharing presentation."""
         username = self._get_username(uid)
         topic = data.get('topic', 'Screen Share')
-        
-        # Check if presentation already active
-        if self.presentation_active:
-            logger.warning(f"Presentation already active by {self.presenter_username}")
-            await self._send_message(uid, create_error_message(f"Presentation already active by {self.presenter_username}"), clients)
+
+        # Check if user already has an active presentation
+        if uid in self.presentations:
+            logger.warning(f"User {username} already has an active presentation")
+            await self._send_message(uid, create_error_message("You already have an active presentation"), clients)
             return
-        
+
         logger.log_screen_share_start(username, uid, topic, 0, 0)  # Ports will be updated
-        
-        # Allocate ports
-        self.presenter_port = self.get_ephemeral_port()
-        self.viewer_port = self.get_ephemeral_port()
-        
-        # Set presentation state
-        self.presentation_active = True
-        self.presenter_uid = uid
-        self.presenter_username = username
-        
-        logger.info(f"  Presenter port: {self.presenter_port}")
-        logger.info(f"  Viewer port: {self.viewer_port}")
-        
+
+        # Allocate ports for this presentation
+        presenter_port = self.get_ephemeral_port()
+        viewer_port = self.get_ephemeral_port()
+
+        # Create presentation info
+        presentation = {
+            'username': username,
+            'topic': topic,
+            'presenter_port': presenter_port,
+            'viewer_port': viewer_port,
+            'presenter_writer': None,
+            'viewers': {},  # viewer_id -> writer
+            'frame_relay_task': None,
+            'presenter_server': None,
+            'viewer_server': None
+        }
+
+        self.presentations[uid] = presentation
+
+        logger.info(f"  Presenter port: {presenter_port}")
+        logger.info(f"  Viewer port: {viewer_port}")
+
         # Log screen share start
-        logger.log_screen_share_start(username, uid, topic, self.presenter_port, self.viewer_port)
-        
+        logger.log_screen_share_start(username, uid, topic, presenter_port, viewer_port)
+
         # Start presenter server
         async def accept_presenter(reader, writer):
-            self.presenter_writer = writer
+            presentation['presenter_writer'] = writer
             addr = writer.get_extra_info('peername')
-            logger.info(f"[SCREEN SHARE] Presenter connected from {addr}")
-            
-            # Start frame relay
-            self.frame_relay_task = asyncio.create_task(self.relay_frames(reader))
-        
+            logger.info(f"[SCREEN SHARE] Presenter {username} connected from {addr}")
+
+            # Start frame relay for this presentation
+            presentation['frame_relay_task'] = asyncio.create_task(self.relay_frames_for_presentation(uid, reader))
+
         try:
-            presenter_server = await asyncio.start_server(
-                accept_presenter, host, self.presenter_port
+            presentation['presenter_server'] = await asyncio.start_server(
+                accept_presenter, host, presenter_port
             )
-            logger.info(f"[SCREEN SHARE] Presenter server started on port {self.presenter_port}")
-            
+            logger.info(f"[SCREEN SHARE] Presenter server for {username} started on port {presenter_port}")
+
             # Start viewer server
             async def accept_viewer(reader, writer):
                 # Viewers are stored and frames are relayed to them
                 viewer_addr = writer.get_extra_info('peername')
-                logger.info(f"[SCREEN SHARE] Viewer connected from {viewer_addr}")
-                
+                logger.info(f"[SCREEN SHARE] Viewer connected to {username}'s presentation from {viewer_addr}")
+
                 # Log viewer connection
-                logger.log_viewer_join(self.presenter_username, self.presenter_uid, viewer_addr)
-                
+                logger.log_viewer_join(username, uid, viewer_addr)
+
                 async with self.lock:
                     # Use a unique ID for this viewer connection
                     viewer_id = id(writer)
-                    self.viewers[viewer_id] = writer
-            
-            viewer_server = await asyncio.start_server(
-                accept_viewer, host, self.viewer_port
+                    presentation['viewers'][viewer_id] = writer
+
+            presentation['viewer_server'] = await asyncio.start_server(
+                accept_viewer, host, viewer_port
             )
-            logger.info(f"[SCREEN SHARE] Viewer server started on port {self.viewer_port}")
-            
+            logger.info(f"[SCREEN SHARE] Viewer server for {username} started on port {viewer_port}")
+
             # Reply to presenter with ports
-            await self._send_message(uid, create_screen_share_ports_message(self.presenter_port, self.viewer_port), clients)
-            
+            await self._send_message(uid, create_screen_share_ports_message(presenter_port, viewer_port), clients)
+
             # Broadcast to all clients
-            await self._broadcast(create_present_start_broadcast_message(uid, username, topic, self.viewer_port), clients)
-            
-            logger.info(f"[SCREEN SHARE] Broadcast sent to all clients")
-        
+            await self._broadcast(create_present_start_broadcast_message(uid, username, topic, viewer_port), clients)
+
+            logger.info(f"[SCREEN SHARE] Broadcast sent to all clients for {username}'s presentation")
+
         except Exception as e:
-            logger.error(f"Failed to start screen sharing: {e}")
-            self.presentation_active = False
-            self.presenter_uid = None
-            self.presenter_username = None
+            logger.error(f"Failed to start screen sharing for {username}: {e}")
+            # Clean up on failure
+            await self._cleanup_presentation(uid)
             await self._send_message(uid, create_error_message(f"Failed to start screen sharing: {e}"), clients)
     
     async def handle_present_stop(self, uid: int, data: dict, clients: Dict[int, asyncio.StreamWriter]):
         """Stop screen sharing presentation."""
         username = self._get_username(uid)
-        
-        if not self.presentation_active:
-            logger.warning(f"No active presentation to stop")
+
+        if uid not in self.presentations:
+            logger.warning(f"No active presentation for {username}")
+            await self._send_message(uid, create_error_message("You don't have an active presentation"), clients)
             return
-        
-        if uid != self.presenter_uid:
-            logger.warning(f"{username} tried to stop presentation by {self.presenter_username}")
-            await self._send_message(uid, create_error_message("You are not the presenter"), clients)
-            return
-        
-        logger.log_screen_share_stop(username, uid, len(self.viewers))
-        
-        # Stop frame relay
-        if self.frame_relay_task:
-            self.frame_relay_task.cancel()
-            try:
-                await self.frame_relay_task
-            except asyncio.CancelledError:
-                pass
-        
-        # Close presenter connection
-        if self.presenter_writer:
-            try:
-                self.presenter_writer.close()
-                await self.presenter_writer.wait_closed()
-            except Exception:
-                pass
-        
-        # Close all viewer connections
-        async with self.lock:
-            for viewer_writer in self.viewers.values():
-                try:
-                    viewer_writer.close()
-                    await viewer_writer.wait_closed()
-                except Exception:
-                    pass
-            self.viewers.clear()
-        
-        # Reset state
-        self.presentation_active = False
-        self.presenter_uid = None
-        self.presenter_username = None
-        self.presenter_port = None
-        self.viewer_port = None
-        
+
+        presentation = self.presentations[uid]
+        logger.log_screen_share_stop(username, uid, len(presentation['viewers']))
+
+        # Clean up the presentation
+        await self._cleanup_presentation(uid)
+
         # Broadcast stop to all clients
         await self._broadcast(create_present_stop_broadcast_message(uid, username), clients)
     
-    async def relay_frames(self, presenter_reader: asyncio.StreamReader):
-        """Relay frames from presenter to all viewers."""
-        logger.info("[SCREEN SHARE] Starting frame relay")
-        
+    async def relay_frames_for_presentation(self, presenter_uid: int, presenter_reader: asyncio.StreamReader):
+        """Relay frames from presenter to all viewers for a specific presentation."""
+        presentation = self.presentations.get(presenter_uid)
+        if not presentation:
+            logger.error(f"No presentation found for uid {presenter_uid}")
+            return
+
+        username = presentation['username']
+        logger.info(f"[SCREEN SHARE] Starting frame relay for {username}'s presentation")
+
         try:
-            while self.presentation_active:
+            while presenter_uid in self.presentations:
                 # Read frame from presenter
                 try:
                     # Read 4-byte frame length header
                     length_data = await presenter_reader.readexactly(4)
                     frame_length = struct.unpack('!I', length_data)[0]
-                    
+
                     # Read frame data
                     frame_data = await presenter_reader.readexactly(frame_length)
-                    
-                    # Relay to all viewers
+
+                    # Relay to all viewers of this presentation
                     disconnected_viewers = []
                     async with self.lock:
-                        for viewer_uid, viewer_writer in self.viewers.items():
+                        for viewer_id, viewer_writer in presentation['viewers'].items():
                             try:
                                 viewer_writer.write(length_data + frame_data)
                                 await viewer_writer.drain()
                             except Exception as e:
-                                logger.error(f"Failed to relay to viewer uid={viewer_uid}: {e}")
-                                disconnected_viewers.append(viewer_uid)
-                    
+                                logger.error(f"Failed to relay to viewer {viewer_id} for {username}: {e}")
+                                disconnected_viewers.append(viewer_id)
+
                     # Clean up disconnected viewers
-                    for viewer_uid in disconnected_viewers:
+                    for viewer_id in disconnected_viewers:
                         async with self.lock:
-                            if viewer_uid in self.viewers:
-                                del self.viewers[viewer_uid]
-                
+                            if viewer_id in presentation['viewers']:
+                                del presentation['viewers'][viewer_id]
+
                 except asyncio.IncompleteReadError:
-                    logger.info("[SCREEN SHARE] Presenter disconnected")
+                    logger.info(f"[SCREEN SHARE] Presenter {username} disconnected")
                     break
                 except Exception as e:
-                    logger.error(f"[SCREEN SHARE] Frame relay error: {e}")
+                    logger.error(f"[SCREEN SHARE] Frame relay error for {username}: {e}")
                     break
-        
+
         finally:
-            logger.info("[SCREEN SHARE] Frame relay stopped")
+            logger.info(f"[SCREEN SHARE] Frame relay stopped for {username}'s presentation")
+            # Clean up the presentation when relay stops
+            await self._cleanup_presentation(presenter_uid)
     
+    async def _cleanup_presentation(self, uid: int):
+        """Clean up a presentation and its resources."""
+        if uid not in self.presentations:
+            return
+
+        presentation = self.presentations[uid]
+        username = presentation['username']
+
+        logger.info(f"[SCREEN SHARE] Cleaning up presentation for {username}")
+
+        # Stop frame relay
+        if presentation['frame_relay_task']:
+            presentation['frame_relay_task'].cancel()
+            try:
+                await presentation['frame_relay_task']
+            except asyncio.CancelledError:
+                pass
+
+        # Close presenter connection
+        if presentation['presenter_writer']:
+            try:
+                presentation['presenter_writer'].close()
+                await presentation['presenter_writer'].wait_closed()
+            except Exception:
+                pass
+
+        # Close all viewer connections
+        async with self.lock:
+            for viewer_writer in presentation['viewers'].values():
+                try:
+                    viewer_writer.close()
+                    await viewer_writer.wait_closed()
+                except Exception:
+                    pass
+
+        # Close servers
+        if presentation['presenter_server']:
+            presentation['presenter_server'].close()
+            await presentation['presenter_server'].wait_closed()
+
+        if presentation['viewer_server']:
+            presentation['viewer_server'].close()
+            await presentation['viewer_server'].wait_closed()
+
+        # Remove from presentations
+        del self.presentations[uid]
+        logger.info(f"[SCREEN SHARE] Presentation cleanup complete for {username}")
+
     async def _send_message(self, uid: int, message: dict, clients: Dict[int, asyncio.StreamWriter]):
         """Send a JSON message to a specific client."""
         async with self.lock:

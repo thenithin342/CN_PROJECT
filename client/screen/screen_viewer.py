@@ -18,9 +18,11 @@ try:
     from PIL import Image as PILImage
     from io import BytesIO
     import numpy as np
+    import cv2
 except ImportError:
     PILImage = None
     np = None
+    cv2 = None
 
 # Try PyQt6 first
 try:
@@ -39,8 +41,8 @@ except ImportError:
         print("[WARNING] PyQt not installed. Screen sharing requires PyQt6 or PyQt5.")
         print("Install with: pip install PyQt6 (recommended) or pip install PyQt5")
 
-# Determine if screen sharing is fully available (needs both PIL, numpy and PyQt)
-SCREEN_SHARE_AVAILABLE = (PILImage is not None) and (np is not None) and (HAS_PYQT6 or HAS_PYQT5)
+# Determine if screen sharing is fully available (needs both PIL, numpy, cv2 and PyQt)
+SCREEN_SHARE_AVAILABLE = (PILImage is not None) and (np is not None) and (cv2 is not None) and (HAS_PYQT6 or HAS_PYQT5)
 
 from common.constants import MessageTypes
 
@@ -221,11 +223,13 @@ class ScreenViewer:
                         # Convert JPEG bytes to numpy array for video grid
                         try:
                             img = PILImage.open(BytesIO(frame_data))
-                            # Convert PIL to numpy array (RGB)
+                            # Convert PIL to numpy array (RGB), then to BGR for video grid
                             img_rgb = img.convert('RGB')
                             frame_array = np.array(img_rgb)
+                            # Convert RGB to BGR (OpenCV format expected by video grid)
+                            frame_bgr = cv2.cvtColor(frame_array, cv2.COLOR_RGB2BGR)
                             # Send to video grid
-                            self.frame_callback(presenter_uid, frame_array)
+                            self.frame_callback(presenter_uid, frame_bgr)
                         except Exception as e:
                             print(f"[VIEWER] Error converting frame: {e}")
 
