@@ -17,8 +17,10 @@ HAS_PYQT5 = False
 try:
     from PIL import Image as PILImage
     from io import BytesIO
+    import numpy as np
 except ImportError:
     PILImage = None
+    np = None
 
 # Try PyQt6 first
 try:
@@ -37,8 +39,8 @@ except ImportError:
         print("[WARNING] PyQt not installed. Screen sharing requires PyQt6 or PyQt5.")
         print("Install with: pip install PyQt6 (recommended) or pip install PyQt5")
 
-# Determine if screen sharing is fully available (needs both PIL and PyQt)
-SCREEN_SHARE_AVAILABLE = (PILImage is not None) and (HAS_PYQT6 or HAS_PYQT5)
+# Determine if screen sharing is fully available (needs both PIL, numpy and PyQt)
+SCREEN_SHARE_AVAILABLE = (PILImage is not None) and (np is not None) and (HAS_PYQT6 or HAS_PYQT5)
 
 from common.constants import MessageTypes
 
@@ -148,15 +150,13 @@ else:
 
 class ScreenViewer:
     """Client-side screen viewing functionality."""
-    
+
     def __init__(self, writer: Optional[asyncio.StreamWriter] = None):
         self.writer = writer
         self.host = 'localhost'
-        self.viewer_window = None
-        self.viewer_task = None
-        self.viewer_app = None
-        self.current_presentation = None  # {username, viewer_port}
+        self.current_presentation = None  # {username, viewer_port, uid}
         self.message_handler: Optional[Callable] = None
+        self.frame_callback = None  # Callback to send frames to video grid
     
     def set_writer(self, writer: asyncio.StreamWriter):
         """Set the writer for sending messages."""
@@ -169,84 +169,88 @@ class ScreenViewer:
     def set_message_handler(self, handler: Callable):
         """Set the message handler for incoming messages."""
         self.message_handler = handler
-    
-    async def view_presentation(self, viewer_port: int, presenter_name: str) -> bool:
+
+    def set_frame_callback(self, callback: Callable):
+        """Set callback to send frames to video grid."""
+        self.frame_callback = callback
+
+    async def view_presentation(self, viewer_port: int, presenter_name: str, presenter_uid: int) -> bool:
         """Start viewing a presentation."""
         if not SCREEN_SHARE_AVAILABLE:
             print("[ERROR] Screen sharing not available. Install: pip install PyQt6 (or pip install PyQt5)")
-            return False        
-        
+            return False
+
         print(f"[VIEW] Opening {presenter_name}'s screen...")
-        
-        # Don't create a new QApplication - use the existing one
-        # Get the existing application instance
-        if not self.viewer_app:
-            self.viewer_app = QApplication.instance()
-            if not self.viewer_app:
-                # Fallback: create a new application (shouldn't happen in GUI)
-                self.viewer_app = QApplication(sys.argv)
-        
-        # Create viewer window
-        self.viewer_window = ScreenViewerWindow(presenter_name)
-        self.viewer_window.show()
-        
+
+        # Store presentation info
+        self.current_presentation = {
+            'username': presenter_name,
+            'viewer_port': viewer_port,
+            'uid': presenter_uid
+        }
+
         # Start receiving frames
-        self.viewer_task = asyncio.create_task(
-            self._receive_and_display_frames(viewer_port, presenter_name)
+        asyncio.create_task(
+            self._receive_and_display_frames(viewer_port, presenter_name, presenter_uid)
         )
-        
+
         return True
     
-    async def _receive_and_display_frames(self, viewer_port: int, presenter_name: str):
-        """Receive frames from server and display in Qt window."""
+    async def _receive_and_display_frames(self, viewer_port: int, presenter_name: str, presenter_uid: int):
+        """Receive frames from server and send to video grid."""
         try:
             # Connect to viewer port
             reader, writer = await asyncio.open_connection(self.host, viewer_port)
             print(f"[VIEWER] Connected to viewer port {viewer_port}")
-            
+
             frame_count = 0
-            
-            while self.viewer_window and self.viewer_window.isVisible():
+
+            while True:
                 try:
                     # Read 4-byte frame length header
                     length_data = await reader.readexactly(4)
                     frame_length = struct.unpack('!I', length_data)[0]
-                    
+
                     # Read frame data
                     frame_data = await reader.readexactly(frame_length)
-                    
+
                     frame_count += 1
-                    
-                    # Emit signal for thread-safe frame update
-                    if self.viewer_window and self.viewer_window.signal_handler:
-                        self.viewer_window.signal_handler.frame_data.emit(frame_data)
-                    
+
+                    # Send frame to video grid via callback
+                    if self.frame_callback:
+                        # Convert JPEG bytes to numpy array for video grid
+                        try:
+                            img = PILImage.open(BytesIO(frame_data))
+                            # Convert PIL to numpy array (RGB)
+                            img_rgb = img.convert('RGB')
+                            frame_array = np.array(img_rgb)
+                            # Send to video grid
+                            self.frame_callback(presenter_uid, frame_array)
+                        except Exception as e:
+                            print(f"[VIEWER] Error converting frame: {e}")
+
                     # Log every 30 frames
                     if frame_count % 30 == 0:
                         frame_size_kb = len(frame_data) / 1024
                         print(f"[VIEWER] Frames received: {frame_count}, "
                               f"Last frame: {frame_size_kb:.1f} KB")
-                    
+
                     # Small delay for UI responsiveness
                     await asyncio.sleep(0.01)
-                
+
                 except asyncio.IncompleteReadError:
                     print("[VIEWER] Connection closed by server")
                     break
                 except Exception as e:
                     print(f"[VIEWER] Error receiving frame: {e}")
                     break
-            
+
             # Close connection
             writer.close()
             await writer.wait_closed()
-            
-            # Emit signal for thread-safe connection closed handling
-            if self.viewer_window and self.viewer_window.signal_handler:
-                self.viewer_window.signal_handler.connection_closed.emit()
-            
+
             print(f"[VIEWER] Connection closed. Total frames: {frame_count}")
-        
+
         except Exception as e:
             print(f"[VIEWER] Failed to connect or display: {e}")
     
@@ -265,15 +269,15 @@ class ScreenViewer:
         username = message.get('username')
         topic = message.get('topic')
         viewer_port = message.get('viewer_port')
-        
+
         if hasattr(self, 'uid') and uid != self.uid:
             print(f"[PRESENT] 🎬 {username} started presentation: {topic}")
-            print(f"[PRESENT] Type '/view' to watch")
             # Store current presentation info
             self.current_presentation = {
                 'username': username,
                 'viewer_port': viewer_port,
-                'topic': topic
+                'topic': topic,
+                'uid': uid
             }
     
     async def _handle_present_stop(self, message: dict):
