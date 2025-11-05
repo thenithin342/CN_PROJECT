@@ -409,6 +409,11 @@ class ParticipantPanel(QWidget):
         self.share_btn.clicked.connect(self.toggle_screen_share)
         layout.addWidget(self.share_btn)
         
+        # Exit application button
+        self.exit_btn = QPushButton("🚪 Exit")
+        self.exit_btn.clicked.connect(lambda: self.parent_window.on_exit() if self.parent_window else None)
+        layout.addWidget(self.exit_btn)
+        
         layout.addStretch()
         self.setLayout(layout)
         
@@ -821,6 +826,8 @@ class ClientMainWindow(QMainWindow):
         self.screen_share_start_worker = None
         self.screen_share_stop_worker = None
         self.active_workers = []  # Track all active workers for proper cleanup
+        # Track whether to resume video after screen share ends
+        self._resume_video_after_share = False
         
         # Setup UI
         self.setup_ui()
@@ -1830,6 +1837,18 @@ class ClientMainWindow(QMainWindow):
         else:
             # Start screen share
             try:
+                # If video is currently streaming, stop it first and remember to resume later
+                try:
+                    video_is_streaming = "Stop" in self.participant_panel.video_btn.text()
+                except Exception:
+                    video_is_streaming = False
+                if video_is_streaming:
+                    self._resume_video_after_share = True
+                    # Use existing toggle to properly stop and clean up UI/state
+                    self.on_toggle_video()
+                else:
+                    self._resume_video_after_share = False
+
                 if self.network_thread and self.network_thread.loop:
                     future = asyncio.run_coroutine_threadsafe(self.screen_presenter.start_presentation(), self.network_thread.loop)
                     result = future.result(timeout=5)
@@ -1868,6 +1887,14 @@ class ClientMainWindow(QMainWindow):
         """Handle screen share started."""
         if error:
             self.chat_widget.add_message("System", f"Failed to start screen share: {error}", is_system=True)
+            # If starting share failed and we planned to resume video after share, start it back now
+            if self._resume_video_after_share:
+                try:
+                    # Ensure video starts
+                    if "Start" in self.participant_panel.video_btn.text():
+                        self.on_toggle_video()
+                finally:
+                    self._resume_video_after_share = False
         else:
             self.participant_panel.share_btn.setText("🖥️ Stop Screen Share")
             self.chat_widget.add_message("System", "Screen share started", is_system=True)
@@ -1879,6 +1906,13 @@ class ClientMainWindow(QMainWindow):
         else:
             self.participant_panel.share_btn.setText("🖥️ Start Screen Share")
             self.chat_widget.add_message("System", "Screen share stopped", is_system=True)
+            # Resume video if it was active before starting the screen share
+            if self._resume_video_after_share:
+                try:
+                    if "Start" in self.participant_panel.video_btn.text():
+                        self.on_toggle_video()
+                finally:
+                    self._resume_video_after_share = False
     
     def handle_present_start_broadcast(self, message: dict):
         """Handle present start broadcast from another user."""
@@ -1986,6 +2020,31 @@ class ClientMainWindow(QMainWindow):
         # Remove from active presentations
         if hasattr(self, 'active_presentations') and uid in self.active_presentations:
             del self.active_presentations[uid]
+    
+    def on_exit(self):
+        """Handle user-requested application exit."""
+        try:
+            reply = QMessageBox.question(
+                self,
+                'Exit Application',
+                'Are you sure you want to exit?',
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+            # Try to notify server before closing
+            try:
+                if self.network_thread:
+                    logout_msg = create_logout_message()
+                    self.network_thread.send_message(logout_msg)
+            except Exception:
+                pass
+            # Close the window (triggers cleanup in closeEvent)
+            self.close()
+        except Exception:
+            # Fallback to force close on unexpected errors
+            self.close()
     
     def _start_local_video_display(self):
         """Start displaying local webcam feed in GUI."""
