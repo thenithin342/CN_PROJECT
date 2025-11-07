@@ -33,7 +33,7 @@ from PyQt6.QtWidgets import (
     QMenu, QDialog
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QSize, QTimer, QMutex, QUrl
-from PyQt6.QtGui import QImage, QPixmap, QFont, QPalette, QColor
+from PyQt6.QtGui import QImage, QPixmap, QFont, QPalette, QColor, QKeySequence, QShortcut
 
 # OpenCV for video
 try:
@@ -100,10 +100,14 @@ class VideoFrame(QLabel):
         self.setMaximumSize(640, 480)
         self.setStyleSheet("""
             QLabel {
-                border: 2px solid #2C3E50;
-                border-radius: 8px;
-                background-color: #1A1A1A;
-                color: white;
+                border: 2px solid #3A4A5C;
+                border-radius: 12px;
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #1E2329, stop:1 #15181C);
+                color: #E8EAED;
+                font-size: 14px;
+                font-weight: 500;
+                padding: 8px;
             }
         """)
         self.setText(f"{self.username}")
@@ -188,12 +192,13 @@ class VideoGridWidget(QWidget):
     def setup_ui(self):
         """Setup the video grid layout."""
         layout = QGridLayout()
-        layout.setSpacing(10)
-        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(15)
+        layout.setContentsMargins(15, 15, 15, 15)
         self.setLayout(layout)
         self.setStyleSheet("""
             QWidget {
-                background-color: #1A1A1A;
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #0F1114, stop:1 #1A1D21);
             }
         """)
     
@@ -315,23 +320,61 @@ class ParticipantItem(QWidget):
     def setup_ui(self, username: str):
         """Setup participant item UI."""
         layout = QHBoxLayout()
-        layout.setContentsMargins(5, 5, 5, 5)
+        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setSpacing(10)
         
         # Username label
         name_label = QLabel(username)
         if self.is_self:
             name_label.setText(f"{username} (You)")
-            name_label.setStyleSheet("font-weight: bold; color: #3498DB;")
+            name_label.setStyleSheet("""
+                font-weight: 600;
+                font-size: 13px;
+                color: #5B9BD5;
+                background: transparent;
+            """)
         else:
-            name_label.setStyleSheet("color: #ECF0F1;")
+            name_label.setStyleSheet("""
+                font-weight: 500;
+                font-size: 13px;
+                color: #E8EAED;
+                background: transparent;
+            """)
         
         layout.addWidget(name_label)
         layout.addStretch()
         
         # Mute button (disabled for self)
         self.mute_btn = QPushButton("🔇" if not self.is_muted else "🔊")
-        self.mute_btn.setMaximumWidth(40)
+        self.mute_btn.setMaximumWidth(45)
+        self.mute_btn.setMaximumHeight(35)
         self.mute_btn.setEnabled(not self.is_self)
+        self.mute_btn.setToolTip("Mute/Unmute this participant")
+        self.mute_btn.setStyleSheet("""
+            QPushButton {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #3A4A5C, stop:1 #2C3A4A);
+                border: 1px solid #4A5A6C;
+                border-radius: 8px;
+                color: #E8EAED;
+                font-size: 16px;
+                padding: 6px;
+            }
+            QPushButton:hover {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #4A5A6C, stop:1 #3A4A5A);
+                border: 1px solid #5A6A7C;
+            }
+            QPushButton:pressed {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #2A3A4C, stop:1 #1C2A3A);
+            }
+            QPushButton:disabled {
+                background: #2A2A2A;
+                border: 1px solid #3A3A3A;
+                color: #6A6A6A;
+            }
+        """)
         if not self.is_self:
             self.mute_btn.clicked.connect(lambda: self.mute_clicked.emit(self.uid))
         
@@ -359,36 +402,69 @@ class ParticipantPanel(QWidget):
     def setup_ui(self):
         """Setup participant panel UI."""
         layout = QVBoxLayout()
-        layout.setSpacing(5)
-        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(12)
+        layout.setContentsMargins(15, 15, 15, 15)
         
         # Title
         title = QLabel("Participants")
-        title.setFont(QFont("Arial", 12, QFont.Weight.Bold))
-        title.setStyleSheet("color: #ECF0F1; padding: 5px;")
+        title.setFont(QFont("Segoe UI", 14, QFont.Weight.Bold))
+        title.setStyleSheet("""
+            color: #E8EAED;
+            padding: 8px 0px;
+            background: transparent;
+            border-bottom: 2px solid #3A4A5C;
+        """)
         layout.addWidget(title)
         
         # Participant list
         self.participant_list = QListWidget()
         self.participant_list.setStyleSheet("""
             QListWidget {
-                background-color: #2C3E50;
-                border: 1px solid #34495E;
-                border-radius: 5px;
-                color: #ECF0F1;
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #252A30, stop:1 #1E2329);
+                border: 1px solid #3A4A5C;
+                border-radius: 10px;
+                color: #E8EAED;
+                padding: 5px;
             }
             QListWidget::item {
-                padding: 5px;
+                padding: 8px;
+                border-radius: 6px;
+                margin: 2px;
+                background: transparent;
+            }
+            QListWidget::item:hover {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #3A4A5C, stop:1 #2A3A4C);
+            }
+            QScrollBar:vertical {
+                background: #1E2329;
+                width: 10px;
+                border-radius: 5px;
+            }
+            QScrollBar::handle:vertical {
+                background: #4A5A6C;
+                border-radius: 5px;
+                min-height: 20px;
+            }
+            QScrollBar::handle:vertical:hover {
+                background: #5A6A7C;
             }
         """)
         # Set minimum height to ensure visibility
-        self.participant_list.setMinimumHeight(100)
+        self.participant_list.setMinimumHeight(120)
         layout.addWidget(self.participant_list)
         
         # Controls section
         controls_title = QLabel("Controls")
-        controls_title.setFont(QFont("Arial", 12, QFont.Weight.Bold))
-        controls_title.setStyleSheet("color: #ECF0F1; padding: 5px; margin-top: 10px;")
+        controls_title.setFont(QFont("Segoe UI", 14, QFont.Weight.Bold))
+        controls_title.setStyleSheet("""
+            color: #E8EAED;
+            padding: 12px 0px 8px 0px;
+            margin-top: 8px;
+            background: transparent;
+            border-bottom: 2px solid #3A4A5C;
+        """)
         layout.addWidget(controls_title)
         
         # Store parent reference for callbacks
@@ -397,21 +473,29 @@ class ParticipantPanel(QWidget):
         # Audio button - starts as muted (button says "Unmute")
         self.audio_btn = QPushButton("🎤 Unmute Audio")
         self.audio_btn.clicked.connect(self.toggle_audio)
+        self.audio_btn.setToolTip("Unmute microphone (Ctrl+M)")
+        self.audio_btn.setStyleSheet(self._get_button_style("#5B9BD5", "#4A8BC5"))
         layout.addWidget(self.audio_btn)
         
         # Video button
         self.video_btn = QPushButton("📹 Start Video")
         self.video_btn.clicked.connect(self.toggle_video)
+        self.video_btn.setToolTip("Start video stream (Ctrl+V)")
+        self.video_btn.setStyleSheet(self._get_button_style("#6C9BD5", "#5B8BC5"))
         layout.addWidget(self.video_btn)
         
         # Screen share button
         self.share_btn = QPushButton("🖥️ Start Screen Share")
         self.share_btn.clicked.connect(self.toggle_screen_share)
+        self.share_btn.setToolTip("Start screen sharing (Ctrl+S)")
+        self.share_btn.setStyleSheet(self._get_button_style("#7BA8D5", "#6A98C5"))
         layout.addWidget(self.share_btn)
         
         # Exit application button
         self.exit_btn = QPushButton("🚪 Exit")
         self.exit_btn.clicked.connect(lambda: self.parent_window.on_exit() if self.parent_window else None)
+        self.exit_btn.setToolTip("Exit application (Ctrl+Q)")
+        self.exit_btn.setStyleSheet(self._get_button_style("#E74C3C", "#C0392B", is_danger=True))
         layout.addWidget(self.exit_btn)
         
         layout.addStretch()
@@ -420,23 +504,57 @@ class ParticipantPanel(QWidget):
         # Styling
         self.setStyleSheet("""
             QWidget {
-                background-color: #34495E;
-            }
-            QPushButton {
-                background-color: #3498DB;
-                color: white;
-                border: none;
-                padding: 10px;
-                border-radius: 5px;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                background-color: #2980B9;
-            }
-            QPushButton:pressed {
-                background-color: #1F618D;
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #252A30, stop:1 #1E2329);
+                border-left: 2px solid #3A4A5C;
             }
         """)
+    
+    def _get_button_style(self, color1: str, color2: str, is_danger: bool = False):
+        """Get modern button style with gradient."""
+        if is_danger:
+            return f"""
+                QPushButton {{
+                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                        stop:0 {color1}, stop:1 {color2});
+                    color: white;
+                    border: none;
+                    padding: 12px 20px;
+                    border-radius: 10px;
+                    font-weight: 600;
+                    font-size: 13px;
+                    min-height: 20px;
+                }}
+                QPushButton:hover {{
+                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                        stop:0 #F56565, stop:1 #DC2626);
+                }}
+                QPushButton:pressed {{
+                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                        stop:0 #C0392B, stop:1 #A93226);
+                }}
+            """
+        return f"""
+            QPushButton {{
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 {color1}, stop:1 {color2});
+                color: white;
+                border: none;
+                padding: 12px 20px;
+                border-radius: 10px;
+                font-weight: 600;
+                font-size: 13px;
+                min-height: 20px;
+            }}
+            QPushButton:hover {{
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #6BA8E5, stop:1 #5A98D5);
+            }}
+            QPushButton:pressed {{
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #4A8BC5, stop:1 #3A7BB5);
+            }}
+        """
     
     def add_participant(self, uid: int, username: str, is_self: bool = False):
         """Add a participant to the list."""
@@ -454,16 +572,35 @@ class ParticipantPanel(QWidget):
     
     def remove_participant(self, uid: int):
         """Remove a participant from the list."""
+        if uid not in self.participants:
+            return
+        
+        # Find and remove the item from the list widget
+        for i in range(self.participant_list.count()):
+            item = self.participant_list.item(i)
+            if item:
+                widget = self.participant_list.itemWidget(item)
+                if widget and hasattr(widget, 'uid') and widget.uid == uid:
+                    # Remove the item from the list
+                    self.participant_list.takeItem(i)
+                    # Clean up the widget
+                    if widget:
+                        widget.deleteLater()
+                    break
+        
+        # Remove from participants dict
         if uid in self.participants:
-            # Find and remove the item
-            for i in range(self.participant_list.count()):
-                item = self.participant_list.item(i)
-                if item:
-                    widget = self.participant_list.itemWidget(item)
-                    if widget and widget.uid == uid:
-                        self.participant_list.takeItem(i)
-                        break
             del self.participants[uid]
+        
+        print(f"[PARTICIPANT PANEL] Removed participant uid={uid}")
+    
+    def clear_all_participants(self):
+        """Clear all participants from the list."""
+        # Clear the list widget
+        self.participant_list.clear()
+        # Clear the participants dict
+        self.participants.clear()
+        print("[PARTICIPANT PANEL] Cleared all participants")
     
     def toggle_audio(self):
         """Toggle audio streaming."""
@@ -540,8 +677,8 @@ class ChatWidget(QWidget):
     def setup_ui(self):
         """Setup chat interface UI."""
         layout = QVBoxLayout()
-        layout.setSpacing(5)
-        layout.setContentsMargins(5, 5, 5, 5)
+        layout.setSpacing(10)
+        layout.setContentsMargins(10, 10, 10, 10)
         
         # Chat text area (using QTextBrowser for link support)
         self.chat_text = QTextBrowser()
@@ -549,16 +686,41 @@ class ChatWidget(QWidget):
         self.chat_text.setOpenExternalLinks(False)  # Handle links ourselves
         self.chat_text.setStyleSheet("""
             QTextBrowser {
-                background-color: #2C2C2C;
-                color: #ECF0F1;
-                border: 1px solid #34495E;
-                border-radius: 5px;
-                padding: 5px;
-                font-size: 10pt;
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #252A30, stop:1 #1E2329);
+                color: #E8EAED;
+                border: 1px solid #3A4A5C;
+                border-radius: 12px;
+                padding: 12px;
+                font-size: 11pt;
+                font-family: 'Segoe UI', Arial, sans-serif;
+                line-height: 1.5;
             }
             QTextBrowser a {
-                color: #3498DB;
+                color: #5B9BD5;
                 text-decoration: none;
+                font-weight: 500;
+            }
+            QTextBrowser a:hover {
+                color: #6BA8E5;
+                text-decoration: underline;
+            }
+            QScrollBar:vertical {
+                background: #1E2329;
+                width: 12px;
+                border-radius: 6px;
+                margin: 0px;
+            }
+            QScrollBar::handle:vertical {
+                background: #4A5A6C;
+                border-radius: 6px;
+                min-height: 30px;
+            }
+            QScrollBar::handle:vertical:hover {
+                background: #5A6A7C;
+            }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+                height: 0px;
             }
         """)
         # Connect anchor clicked signal to handle downloads
@@ -567,54 +729,52 @@ class ChatWidget(QWidget):
         
         # Input area
         input_layout = QHBoxLayout()
+        input_layout.setSpacing(8)
         
         self.input_field = QLineEdit()
-        self.input_field.setPlaceholderText("Type a message...")
+        self.input_field.setPlaceholderText("Type a message... (Press Enter to send, Ctrl+L to focus)")
         self.input_field.setStyleSheet("""
             QLineEdit {
-                background-color: #34495E;
-                color: #ECF0F1;
-                border: 1px solid #2C3E50;
-                border-radius: 5px;
-                padding: 5px;
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #2A2F35, stop:1 #252A30);
+                color: #E8EAED;
+                border: 2px solid #3A4A5C;
+                border-radius: 10px;
+                padding: 10px 15px;
+                font-size: 12pt;
+                font-family: 'Segoe UI', Arial, sans-serif;
+            }
+            QLineEdit:focus {
+                border: 2px solid #5B9BD5;
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #2F343A, stop:1 #2A2F35);
             }
         """)
         self.input_field.returnPressed.connect(self.send_message)
-        input_layout.addWidget(self.input_field)
-        
-        # Send button
-        send_btn = QPushButton("Send")
-        send_btn.clicked.connect(self.send_message)
-        send_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #3498DB;
-                color: white;
-                border: none;
-                padding: 8px 15px;
-                border-radius: 5px;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                background-color: #2980B9;
-            }
-        """)
-        input_layout.addWidget(send_btn)
+        input_layout.addWidget(self.input_field, stretch=1)
         
         # File upload button
         file_btn = QPushButton("📎")
         file_btn.setToolTip("Upload File")
         file_btn.clicked.connect(self.upload_file)
-        file_btn.setMaximumWidth(50)
+        file_btn.setFixedSize(45, 45)
         file_btn.setStyleSheet("""
             QPushButton {
-                background-color: #27AE60;
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #27AE60, stop:1 #229954);
                 color: white;
                 border: none;
-                padding: 8px;
-                border-radius: 5px;
+                border-radius: 10px;
+                font-size: 18px;
+                font-weight: bold;
             }
             QPushButton:hover {
-                background-color: #229954;
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #2ECC71, stop:1 #27AE60);
+            }
+            QPushButton:pressed {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #229954, stop:1 #1E8449);
             }
         """)
         input_layout.addWidget(file_btn)
@@ -624,29 +784,95 @@ class ChatWidget(QWidget):
         send_to_btn.setToolTip("Choose recipients: Unicast, Multicast, Broadcast")
         send_to_btn.setStyleSheet("""
             QPushButton {
-                background-color: #2ECC71;
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #2ECC71, stop:1 #27AE60);
                 color: white;
                 border: none;
-                padding: 8px 12px;
-                border-radius: 5px;
-                font-weight: bold;
+                padding: 10px 16px;
+                border-radius: 10px;
+                font-weight: 600;
+                font-size: 12pt;
             }
             QPushButton:hover {
-                background-color: #27AE60;
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #35D67A, stop:1 #2ECC71);
+            }
+            QPushButton:pressed {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #27AE60, stop:1 #229954);
             }
         """)
         menu = QMenu(send_to_btn)
+        menu.setStyleSheet("""
+            QMenu {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #2A2F35, stop:1 #252A30);
+                border: 1px solid #3A4A5C;
+                border-radius: 8px;
+                padding: 5px;
+            }
+            QMenu::item {
+                padding: 8px 20px;
+                border-radius: 5px;
+                color: #E8EAED;
+            }
+            QMenu::item:selected {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #3A4A5C, stop:1 #2A3A4C);
+            }
+        """)
         menu.addAction("Broadcast", self.send_broadcast)
         menu.addAction("Private (Unicast)", self.send_private)
         menu.addAction("Multicast", self.send_multicast)
         send_to_btn.setMenu(menu)
         input_layout.addWidget(send_to_btn)
         
+        # Send button
+        send_btn = QPushButton("Send")
+        send_btn.clicked.connect(self.send_message)
+        send_btn.setToolTip("Send message (Enter)")
+        send_btn.setStyleSheet("""
+            QPushButton {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #5B9BD5, stop:1 #4A8BC5);
+                color: white;
+                border: none;
+                padding: 10px 24px;
+                border-radius: 10px;
+                font-weight: 600;
+                font-size: 12pt;
+            }
+            QPushButton:hover {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #6BA8E5, stop:1 #5B9BD5);
+            }
+            QPushButton:pressed {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #4A8BC5, stop:1 #3A7BB5);
+            }
+        """)
+        input_layout.addWidget(send_btn)
+        
         layout.addLayout(input_layout)
         
         # Progress bar for file uploads
         self.progress_bar = QProgressBar()
         self.progress_bar.setVisible(False)
+        self.progress_bar.setStyleSheet("""
+            QProgressBar {
+                border: 1px solid #3A4A5C;
+                border-radius: 8px;
+                text-align: center;
+                color: #E8EAED;
+                font-weight: 500;
+                height: 25px;
+            }
+            QProgressBar::chunk {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #5B9BD5, stop:1 #4A8BC5);
+                border-radius: 7px;
+            }
+        """)
         layout.addWidget(self.progress_bar)
         
         self.setLayout(layout)
@@ -693,9 +919,9 @@ class ChatWidget(QWidget):
         """Add message to chat."""
         timestamp = datetime.now().strftime("%H:%M")
         if is_system:
-            self.chat_text.append(f'<span style="color: #95A5A6;">[{timestamp}] {message}</span>')
+            self.chat_text.append(f'<div style="margin: 4px 0;"><span style="color: #95A5A6; font-size: 10pt;">[{timestamp}]</span> <span style="color: #B0BEC5; font-style: italic;">{message}</span></div>')
         else:
-            self.chat_text.append(f'<span style="color: #3498DB;">{username}:</span> {message}')
+            self.chat_text.append(f'<div style="margin: 6px 0;"><span style="color: #5B9BD5; font-weight: 600; font-size: 11pt;">{username}:</span> <span style="color: #E8EAED; font-size: 11pt;">{message}</span></div>')
         
         # Auto scroll to bottom
         scrollbar = self.chat_text.verticalScrollBar()
@@ -711,9 +937,10 @@ class ChatWidget(QWidget):
         
         # Add as a custom HTML widget with a clickable link style
         notification_html = f'''
-        <div style="background-color: #2C3E50; padding: 8px; border-radius: 5px; margin: 5px 0;">
-            <span style="color: #95A5A6;">[{timestamp}]</span> {message}
-            <a href="download://{fid}" style="color: #3498DB; text-decoration: none; font-weight: bold; margin-left: 10px;">
+        <div style="background: linear-gradient(135deg, #2A3A4C 0%, #1E2A3A 100%); padding: 12px; border-radius: 10px; margin: 8px 0; border-left: 3px solid #5B9BD5;">
+            <span style="color: #95A5A6; font-size: 11pt;">[{timestamp}]</span> 
+            <span style="color: #E8EAED;">{message}</span>
+            <a href="download://{fid}" style="color: #5B9BD5; text-decoration: none; font-weight: 600; margin-left: 12px; font-size: 11pt; padding: 4px 8px; background: rgba(91, 155, 213, 0.2); border-radius: 5px;">
                 ⬇️ Download
             </a>
         </div>
@@ -856,11 +1083,46 @@ class ClientMainWindow(QMainWindow):
         
         # Main vertical layout for top video area and bottom chat
         main_layout = QVBoxLayout()
-        main_layout.setSpacing(5)
-        main_layout.setContentsMargins(10, 10, 10, 10)
+        main_layout.setSpacing(12)
+        main_layout.setContentsMargins(12, 12, 12, 12)
+        
+        # Status bar at top
+        status_bar_layout = QHBoxLayout()
+        status_bar_layout.setContentsMargins(0, 0, 0, 8)
+        
+        # Connection status indicator
+        self.connection_status = QLabel("● Disconnected")
+        self.connection_status.setStyleSheet("""
+            QLabel {
+                color: #E74C3C;
+                font-weight: 600;
+                font-size: 11pt;
+                padding: 6px 12px;
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #2A1F1F, stop:1 #1E1515);
+                border: 1px solid #4A2A2A;
+                border-radius: 8px;
+            }
+        """)
+        status_bar_layout.addWidget(self.connection_status)
+        
+        # User info label
+        self.user_info_label = QLabel("")
+        self.user_info_label.setStyleSheet("""
+            QLabel {
+                color: #95A5A6;
+                font-size: 10pt;
+                padding: 6px 12px;
+            }
+        """)
+        status_bar_layout.addStretch()
+        status_bar_layout.addWidget(self.user_info_label)
+        
+        main_layout.addLayout(status_bar_layout)
         
         # Top area: Video grid and participant panel (horizontal)
         top_area = QHBoxLayout()
+        top_area.setSpacing(12)
         
         # Video grid (left, takes most space)
         self.video_grid = VideoGridWidget()
@@ -875,8 +1137,8 @@ class ClientMainWindow(QMainWindow):
         
         # Chat widget (bottom area) - Fixed size to prevent layout issues
         self.chat_widget = ChatWidget()
-        self.chat_widget.setMinimumHeight(200)
-        self.chat_widget.setMaximumHeight(250)
+        self.chat_widget.setMinimumHeight(220)
+        self.chat_widget.setMaximumHeight(280)
         self.chat_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         main_layout.addWidget(self.chat_widget, stretch=0)
         
@@ -885,6 +1147,101 @@ class ClientMainWindow(QMainWindow):
         
         # Set dark theme
         self.apply_dark_theme()
+        
+        # Setup keyboard shortcuts
+        self.setup_keyboard_shortcuts()
+        
+        # Show welcome message
+        self.chat_widget.add_message("System", "👋 Welcome to LAN Collaboration!", is_system=True)
+        self.chat_widget.add_message("System", "Connect to a server to start collaborating. Use the controls panel to manage your audio, video, and screen sharing.", is_system=True)
+    
+    def setup_keyboard_shortcuts(self):
+        """Setup keyboard shortcuts for common actions."""
+        # Toggle audio: Ctrl+M
+        self.shortcut_audio = QShortcut(QKeySequence("Ctrl+M"), self)
+        self.shortcut_audio.activated.connect(self.on_toggle_audio)
+        
+        # Toggle video: Ctrl+V
+        self.shortcut_video = QShortcut(QKeySequence("Ctrl+V"), self)
+        self.shortcut_video.activated.connect(self.on_toggle_video)
+        
+        # Toggle screen share: Ctrl+S
+        self.shortcut_screen = QShortcut(QKeySequence("Ctrl+S"), self)
+        self.shortcut_screen.activated.connect(self.on_toggle_screen_share)
+        
+        # Focus chat input: Ctrl+L
+        self.shortcut_chat_focus = QShortcut(QKeySequence("Ctrl+L"), self)
+        self.shortcut_chat_focus.activated.connect(lambda: self.chat_widget.input_field.setFocus())
+        
+        # Exit: Ctrl+Q
+        self.shortcut_exit = QShortcut(QKeySequence("Ctrl+Q"), self)
+        self.shortcut_exit.activated.connect(self.on_exit)
+    
+    def update_connection_status(self, connected: bool, username: str = None):
+        """Update connection status indicator."""
+        if connected:
+            self.connection_status.setText("● Connected")
+            self.connection_status.setStyleSheet("""
+                QLabel {
+                    color: #2ECC71;
+                    font-weight: 600;
+                    font-size: 11pt;
+                    padding: 6px 12px;
+                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                        stop:0 #1F2A1F, stop:1 #151E15);
+                    border: 1px solid #2A4A2A;
+                    border-radius: 8px;
+                }
+            """)
+            if username:
+                self.user_info_label.setText(f"Logged in as: {username}")
+        else:
+            self.connection_status.setText("● Disconnected")
+            self.connection_status.setStyleSheet("""
+                QLabel {
+                    color: #E74C3C;
+                    font-weight: 600;
+                    font-size: 11pt;
+                    padding: 6px 12px;
+                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                        stop:0 #2A1F1F, stop:1 #1E1515);
+                    border: 1px solid #4A2A2A;
+                    border-radius: 8px;
+                }
+            """)
+            self.user_info_label.setText("")
+    
+    def update_button_states(self):
+        """Update button visual states based on current status."""
+        # Update audio button
+        if self.audio_client and self.audio_client.is_recording:
+            self.participant_panel.audio_btn.setText("🎤 Mute Audio")
+            self.participant_panel.audio_btn.setToolTip("Mute microphone (Ctrl+M)")
+            self.participant_panel.audio_btn.setStyleSheet(self.participant_panel._get_button_style("#2ECC71", "#27AE60"))
+        else:
+            self.participant_panel.audio_btn.setText("🎤 Unmute Audio")
+            self.participant_panel.audio_btn.setToolTip("Unmute microphone (Ctrl+M)")
+            self.participant_panel.audio_btn.setStyleSheet(self.participant_panel._get_button_style("#5B9BD5", "#4A8BC5"))
+        
+        # Update video button
+        if self.video_client and self.video_client.is_streaming:
+            self.participant_panel.video_btn.setText("📹 Stop Video")
+            self.participant_panel.video_btn.setToolTip("Stop video stream (Ctrl+V)")
+            self.participant_panel.video_btn.setStyleSheet(self.participant_panel._get_button_style("#2ECC71", "#27AE60"))
+        else:
+            self.participant_panel.video_btn.setText("📹 Start Video")
+            self.participant_panel.video_btn.setToolTip("Start video stream (Ctrl+V)")
+            self.participant_panel.video_btn.setStyleSheet(self.participant_panel._get_button_style("#6C9BD5", "#5B8BC5"))
+        
+        # Update screen share button
+        if self.screen_presenter and hasattr(self.screen_presenter, 'is_presenting') and self.screen_presenter.is_presenting:
+            self.participant_panel.share_btn.setText("🖥️ Stop Screen Share")
+            self.participant_panel.share_btn.setToolTip("Stop screen sharing (Ctrl+S)")
+            self.participant_panel.share_btn.setStyleSheet(self.participant_panel._get_button_style("#2ECC71", "#27AE60"))
+        else:
+            self.participant_panel.share_btn.setText("🖥️ Start Screen Share")
+            self.participant_panel.share_btn.setToolTip("Start screen sharing (Ctrl+S)")
+            self.participant_panel.share_btn.setStyleSheet(self.participant_panel._get_button_style("#7BA8D5", "#6A98C5"))
     
     def setup_connections(self):
         """Setup signal-slot connections."""
@@ -904,11 +1261,13 @@ class ClientMainWindow(QMainWindow):
         """Apply dark theme styling."""
         self.setStyleSheet("""
             QMainWindow {
-                background-color: #1A1A1A;
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #0F1114, stop:1 #1A1D21);
             }
             QWidget {
-                background-color: #1A1A1A;
-                color: #ECF0F1;
+                background: transparent;
+                color: #E8EAED;
+                font-family: 'Segoe UI', Arial, sans-serif;
             }
         """)
     
@@ -1155,13 +1514,31 @@ class ClientMainWindow(QMainWindow):
             
     def on_connected(self):
         """Handle successful connection."""
+        self.update_connection_status(True, self.username)
         self.chat_widget.add_message("System", "✓ Connected to server", is_system=True)
+        self.chat_widget.add_message("System", "💡 Tip: Use Ctrl+M to toggle audio, Ctrl+V for video, Ctrl+L to focus chat", is_system=True)
         self.setWindowTitle(f"LAN Collaboration Client - {self.username} (Connected)")
+        # Update button states
+        if hasattr(self, 'update_button_states'):
+            self.update_button_states()
     
     def on_disconnected(self):
         """Handle disconnection."""
+        self.update_connection_status(False)
         self.chat_widget.add_message("System", "✗ Disconnected from server", is_system=True)
         self.setWindowTitle("LAN Collaboration Client (Disconnected)")
+        
+        # Clear all participants when disconnected
+        self.participant_panel.clear_all_participants()
+        self.participants.clear()
+        
+        # Clear video feeds
+        for uid in list(self.video_grid.video_frames.keys()):
+            self.video_grid.remove_video_feed(uid)
+        
+        # Update button states
+        if hasattr(self, 'update_button_states'):
+            self.update_button_states()
     
     def handle_message(self, message: dict):
         """Handle incoming message from server."""
@@ -1171,6 +1548,7 @@ class ClientMainWindow(QMainWindow):
             if msg_type == MessageTypes.LOGIN_SUCCESS:
                 self.uid = message.get('uid')
                 self.chat_widget.add_message("System", f"Logged in as {self.username} (uid={self.uid})", is_system=True)
+                self.update_connection_status(True, self.username)
                 
                 # Initialize client modules
                 self.initialize_client_modules()
@@ -1193,29 +1571,28 @@ class ClientMainWindow(QMainWindow):
                 username = message.get('username')
                 print(f"[GUI] Received user_joined: uid={uid}, username={username}")
                 self.chat_widget.add_message("System", f"{username} joined", is_system=True)
-                # Note: Participant list should be updated via PARTICIPANT_LIST message
+                # Request updated participant list to ensure sync
+                self.request_participant_list()
             
             elif msg_type == MessageTypes.USER_LEFT:
                 uid = message.get('uid')
                 username = message.get('username')
+                print(f"[GUI] Received user_left: uid={uid}, username={username}")
                 self.chat_widget.add_message("System", f"{username} left", is_system=True)
                 
-                # Remove from participants
+                # Remove from participants dict and UI
                 if uid in self.participants:
                     self.participant_panel.remove_participant(uid)
                     del self.participants[uid]
+                    print(f"[GUI] Removed participant uid={uid} from participants dict")
                 
-                # Remove video feed (only if it's not active)
+                # Remove video feed immediately when user leaves
                 if uid in self.video_grid.video_frames:
-                    # Keep the video feed for a bit in case they reconnect
-                    # Only remove if they haven't sent a frame in the last 30 seconds
-                    if uid in self.video_grid.last_frame_time:
-                        time_since_last_frame = time.time() - self.video_grid.last_frame_time[uid]
-                        if time_since_last_frame > 30:
-                            self.video_grid.remove_video_feed(uid)
-                    else:
-                        # No recent frames, remove immediately
-                        self.video_grid.remove_video_feed(uid)
+                    self.video_grid.remove_video_feed(uid)
+                    print(f"[GUI] Removed video feed for uid={uid}")
+                
+                # Request updated participant list to ensure sync
+                self.request_participant_list()
             
             elif msg_type == MessageTypes.CHAT:
                 self.handle_chat_message(message)
@@ -1282,23 +1659,48 @@ class ClientMainWindow(QMainWindow):
         print(f"[GUI] Updating participants list with {len(participants)} participants")
         print(f"[GUI] Participants data: {participants}")
         
-        # Clear existing
-        for uid in list(self.participants.keys()):
-            self.participant_panel.remove_participant(uid)
-            # Don't remove video feeds - they should persist if video is active
-            # self.video_grid.remove_video_feed(uid)
+        # Get current UIDs in the UI
+        current_uids_in_ui = set(self.participant_panel.participants.keys())
         
-        # Add new participants
+        # Get UIDs from server
+        server_uids = set()
+        for p in participants:
+            uid = p.get('uid')
+            if uid is not None:
+                server_uids.add(uid)
+        
+        # Remove participants that are in UI but not in server list
+        uids_to_remove = current_uids_in_ui - server_uids
+        for uid in uids_to_remove:
+            if uid != self.uid:  # Don't remove self
+                print(f"[GUI] Removing participant uid={uid} (not in server list)")
+                self.participant_panel.remove_participant(uid)
+                if uid in self.participants:
+                    del self.participants[uid]
+                # Also remove video feed
+                if uid in self.video_grid.video_frames:
+                    self.video_grid.remove_video_feed(uid)
+        
+        # Add or update participants from server list
         for p in participants:
             uid = p.get('uid')
             username = p.get('username')
             if uid is None or username is None:
                 print(f"[GUI] Warning: Invalid participant data: {p}")
                 continue
+            
+            # Update or add participant
             self.participants[uid] = p
-            self.participant_panel.add_participant(uid, username, uid == self.uid)
-            print(f"[GUI] Added participant uid={uid}, username={username}")
-            # Add video feed placeholder for all participants
+            
+            # Add to UI if not already present
+            if uid not in self.participant_panel.participants:
+                self.participant_panel.add_participant(uid, username, uid == self.uid)
+                print(f"[GUI] Added participant uid={uid}, username={username}")
+            else:
+                # Update existing participant if needed
+                print(f"[GUI] Participant uid={uid}, username={username} already in list")
+            
+            # Add video feed placeholder if not exists
             if uid not in self.video_grid.video_frames:
                 self.video_grid.add_video_feed(uid, username)
                 print(f"[GUI] Added video feed placeholder for participant uid={uid}, username={username}")
@@ -1624,14 +2026,83 @@ class ClientMainWindow(QMainWindow):
         # For better UX we'd build a custom QDialog with a QListWidget in multi-selection mode.
         dialog = QDialog(self)
         dialog.setWindowTitle("Select Recipients")
+        dialog.setStyleSheet("""
+            QDialog {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #252A30, stop:1 #1E2329);
+            }
+        """)
         from PyQt6.QtWidgets import QVBoxLayout, QListWidget, QPushButton
         layout = QVBoxLayout(dialog)
+        layout.setSpacing(12)
+        layout.setContentsMargins(15, 15, 15, 15)
+        
         list_widget = QListWidget(dialog)
         list_widget.addItems(choices)
         list_widget.setSelectionMode(QListWidget.SelectionMode.MultiSelection)
+        list_widget.setStyleSheet("""
+            QListWidget {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #252A30, stop:1 #1E2329);
+                border: 1px solid #3A4A5C;
+                border-radius: 10px;
+                color: #E8EAED;
+                padding: 5px;
+                font-size: 12pt;
+            }
+            QListWidget::item {
+                padding: 10px;
+                border-radius: 6px;
+                margin: 2px;
+                background: transparent;
+            }
+            QListWidget::item:hover {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #3A4A5C, stop:1 #2A3A4C);
+            }
+            QListWidget::item:selected {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #5B9BD5, stop:1 #4A8BC5);
+                color: white;
+            }
+            QScrollBar:vertical {
+                background: #1E2329;
+                width: 10px;
+                border-radius: 5px;
+            }
+            QScrollBar::handle:vertical {
+                background: #4A5A6C;
+                border-radius: 5px;
+                min-height: 20px;
+            }
+            QScrollBar::handle:vertical:hover {
+                background: #5A6A7C;
+            }
+        """)
         layout.addWidget(list_widget)
+        
         ok_btn = QPushButton("OK", dialog)
         ok_btn.clicked.connect(dialog.accept)
+        ok_btn.setStyleSheet("""
+            QPushButton {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #5B9BD5, stop:1 #4A8BC5);
+                color: white;
+                border: none;
+                padding: 10px 30px;
+                border-radius: 10px;
+                font-weight: 600;
+                font-size: 12pt;
+            }
+            QPushButton:hover {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #6BA8E5, stop:1 #5B9BD5);
+            }
+            QPushButton:pressed {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #4A8BC5, stop:1 #3A7BB5);
+            }
+        """)
         layout.addWidget(ok_btn)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return None
@@ -1742,6 +2213,7 @@ class ClientMainWindow(QMainWindow):
                     print("[GUI] Audio recording started")
                 self.participant_panel.audio_btn.setText("🎤 Mute Audio")
                 self.chat_widget.add_message("System", "Audio unmuted - microphone is now active", is_system=True)
+                self.update_button_states()
             except Exception as e:
                 self.chat_widget.add_message("System", f"Failed to start audio: {e}", is_system=True)
                 print(f"[GUI] Audio start error: {e}")
@@ -1755,6 +2227,7 @@ class ClientMainWindow(QMainWindow):
                     print("[GUI] Audio recording stopped")
                 self.participant_panel.audio_btn.setText("🎤 Unmute Audio")
                 self.chat_widget.add_message("System", "Audio muted - microphone is off", is_system=True)
+                self.update_button_states()
             except Exception as e:
                 self.chat_widget.add_message("System", f"Failed to stop audio: {e}", is_system=True)
                 print(f"[GUI] Audio stop error: {e}")
@@ -1775,6 +2248,7 @@ class ClientMainWindow(QMainWindow):
                 self.video_client.stop_streaming()
                 self.participant_panel.video_btn.setText("📹 Start Video")
                 self.chat_widget.add_message("System", "Video stopped", is_system=True)
+                self.update_button_states()
                 # Stop local video capture timer
                 if hasattr(self, 'local_video_timer'):
                     self.local_video_timer.stop()
@@ -1804,6 +2278,7 @@ class ClientMainWindow(QMainWindow):
                 self.video_client.start_streaming()
                 self.participant_panel.video_btn.setText("📹 Stop Video")
                 self.chat_widget.add_message("System", "Video started", is_system=True)
+                self.update_button_states()
                 # Start local video capture for GUI display
                 self._start_local_video_display()
             except Exception as e:
@@ -1898,6 +2373,7 @@ class ClientMainWindow(QMainWindow):
         else:
             self.participant_panel.share_btn.setText("🖥️ Stop Screen Share")
             self.chat_widget.add_message("System", "Screen share started", is_system=True)
+            self.update_button_states()
     
     def _on_screen_share_stopped(self, error: str = None):
         """Handle screen share stopped."""
@@ -1906,6 +2382,7 @@ class ClientMainWindow(QMainWindow):
         else:
             self.participant_panel.share_btn.setText("🖥️ Start Screen Share")
             self.chat_widget.add_message("System", "Screen share stopped", is_system=True)
+            self.update_button_states()
             # Resume video if it was active before starting the screen share
             if self._resume_video_after_share:
                 try:
